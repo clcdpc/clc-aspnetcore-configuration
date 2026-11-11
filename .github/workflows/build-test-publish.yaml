@@ -1,4 +1,4 @@
-name: Build, test, pack, and publish
+name: build-test-publish
 
 on:
   pull_request:
