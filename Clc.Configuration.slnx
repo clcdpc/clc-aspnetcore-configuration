@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/Clc.Configuration/Clc.Configuration.csproj" />
+  <Project Path="tests/Clc.Configuration.Tests/Clc.Configuration.Tests.csproj" />
+</Solution>

@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <PackageId>Clc.Configuration</PackageId>
+    <Version>0.1.0</Version>
+    <Description>Loads one authoritative ASP.NET Core application.json from the operating system ProgramData directory.</Description>
+    <PackageTags>configuration;aspnetcore;clc</PackageTags>
+    <IsPackable>true</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <InternalsVisibleTo Include="Clc.Configuration.Tests" />
+  </ItemGroup>
+</Project>
