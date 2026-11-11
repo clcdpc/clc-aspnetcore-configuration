@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Xml.Linq;
 
 namespace Clc.Configuration.Tests;
 
@@ -59,6 +60,8 @@ public sealed class PackageConsumerTests
         var configuration = GetBuildConfiguration();
         var repositoryRoot = FindRepositoryRoot();
         var libraryProject = Path.Combine(repositoryRoot, "src", "Clc.Configuration", "Clc.Configuration.csproj");
+        var expectedPackageVersion = GetProjectProperty(libraryProject, "Version");
+        Assert.Equal(expectedPackageVersion, GetConsumerPackageVersion(consumerDirectory));
         var consumerProject = Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj");
 
         await RunDotnetAsync(
@@ -73,10 +76,29 @@ public sealed class PackageConsumerTests
             packageCache);
 
         var packagePath = Assert.Single(Directory.GetFiles(packageFeed, "*.nupkg"));
+        Assert.Equal(expectedPackageVersion, GetPackageMetadataValue(packagePath, "version"));
+        Assert.Equal("Clc.Configuration", GetPackageMetadataValue(packagePath, "id"));
+        Assert.Equal("Central Library Consortium", GetPackageMetadataValue(packagePath, "authors"));
+
+        using (var package = ZipFile.OpenRead(packagePath))
+        {
+            var metadata = GetPackageMetadata(package);
+            var license = metadata.Elements().Single(element => element.Name.LocalName == "license");
+            Assert.Equal("expression", (string?)license.Attribute("type"));
+            Assert.Equal("MIT", license.Value);
+            Assert.Equal(
+                "https://github.com/clcdpc/clc-configuration",
+                (string?)metadata.Elements().Single(element => element.Name.LocalName == "repository").Attribute("url"));
+            Assert.Equal("git", (string?)metadata.Elements().Single(element => element.Name.LocalName == "repository").Attribute("type"));
+            Assert.Equal("README.md", metadata.Elements().Single(element => element.Name.LocalName == "readme").Value);
+            Assert.NotNull(package.GetEntry("README.md"));
+            Assert.NotNull(package.GetEntry("LICENSE"));
+        }
+
         var cachedAssemblyPath = Path.Combine(
             packageCache,
             "clc.configuration",
-            "0.1.0",
+            expectedPackageVersion.ToLowerInvariant(),
             "lib",
             "net10.0",
             "Clc.Configuration.dll");
@@ -146,6 +168,43 @@ public sealed class PackageConsumerTests
         using var buffer = new MemoryStream();
         stream.CopyTo(buffer);
         return Convert.ToHexString(SHA256.HashData(buffer.ToArray()));
+    }
+
+    private static string GetProjectProperty(string projectPath, string propertyName)
+    {
+        var project = XDocument.Load(projectPath);
+        var property = project
+            .Descendants()
+            .Single(element => element.Name.LocalName == propertyName);
+        return property.Value;
+    }
+
+    private static string GetConsumerPackageVersion(string consumerDirectory)
+    {
+        var project = XDocument.Load(Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj"));
+        var packageReference = project
+            .Descendants()
+            .Single(element =>
+                element.Name.LocalName == "PackageReference"
+                && (string?)element.Attribute("Include") == "Clc.Configuration");
+        return (string?)packageReference.Attribute("Version")
+            ?? packageReference.Elements().Single(element => element.Name.LocalName == "Version").Value;
+    }
+
+    private static string GetPackageMetadataValue(string packagePath, string elementName)
+    {
+        using var package = ZipFile.OpenRead(packagePath);
+        return GetPackageMetadata(package).Elements().Single(element => element.Name.LocalName == elementName).Value;
+    }
+
+    private static XElement GetPackageMetadata(ZipArchive package)
+    {
+        var nuspec = Assert.Single(
+            package.Entries,
+            entry => entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase));
+        using var stream = nuspec.Open();
+        var document = XDocument.Load(stream);
+        return document.Root!.Elements().Single(element => element.Name.LocalName == "metadata");
     }
 
     private static async Task ReadToEndAsync(StreamReader reader, StringBuilder destination)
