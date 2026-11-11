@@ -3,12 +3,18 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
 
 namespace Clc.Configuration;
 
 internal static class ExternalConfigurationLoader
 {
     private const int MaximumConfigurationBytes = 4 * 1024 * 1024;
+    private static readonly HashSet<string> WindowsReservedDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"
+    };
+
     private static readonly string[] PreservedHostKeys =
     [
         WebHostDefaults.ServerUrlsKey,
@@ -131,6 +137,7 @@ internal static class ExternalConfigurationLoader
                 $"External application configuration file cannot be read: '{path}'. Check access for the application identity.");
         }
 
+        Dictionary<string, string?> configuration;
         try
         {
             var bytes = NormalizeJsonEncoding(input);
@@ -148,7 +155,7 @@ internal static class ExternalConfigurationLoader
                 .AddJsonStream(snapshot)
                 .Build();
 
-            return loaded.AsEnumerable().ToDictionary(
+            configuration = loaded.AsEnumerable().ToDictionary(
                 pair => pair.Key,
                 pair => pair.Value,
                 StringComparer.OrdinalIgnoreCase);
@@ -160,6 +167,14 @@ internal static class ExternalConfigurationLoader
             throw new InvalidOperationException(
                 $"External application configuration file contains invalid JSON, duplicate keys, or an unsupported text encoding: '{path}'. Correct the file and restart the application.");
         }
+
+        if (!HasValidLoggingLevels(configuration))
+        {
+            throw new InvalidOperationException(
+                $"External application configuration file contains invalid Logging:LogLevel settings: '{path}'. Use named log levels from Trace through None and restart the application.");
+        }
+
+        return configuration;
     }
 
     private static byte[] NormalizeJsonEncoding(byte[] input)
@@ -232,9 +247,28 @@ internal static class ExternalConfigurationLoader
         }
     }
 
+    private static bool HasValidLoggingLevels(IReadOnlyDictionary<string, string?> configuration)
+    {
+        return configuration.All(setting =>
+            setting.Value is null ||
+            !setting.Key.Contains(":LogLevel:", StringComparison.OrdinalIgnoreCase) ||
+            (Enum.TryParse<LogLevel>(setting.Value, ignoreCase: true, out var level) &&
+                Enum.IsDefined(level) &&
+                Enum.GetNames<LogLevel>().Contains(setting.Value, StringComparer.OrdinalIgnoreCase)));
+    }
+
     private static void ValidateApplicationDirectoryName(string applicationDirectoryName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(applicationDirectoryName);
+
+        var extensionSeparator = applicationDirectoryName.IndexOf('.');
+        var deviceName = extensionSeparator >= 0
+            ? applicationDirectoryName[..extensionSeparator]
+            : applicationDirectoryName;
+        var isNumberedDeviceName = deviceName.Length == 4 &&
+            (deviceName.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
+                deviceName.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
+            deviceName[3] is >= '1' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3';
 
         if (applicationDirectoryName is "." or ".." ||
             Path.IsPathRooted(applicationDirectoryName) ||
@@ -243,7 +277,9 @@ internal static class ExternalConfigurationLoader
             applicationDirectoryName.EndsWith(' ') ||
             applicationDirectoryName.EndsWith('.') ||
             applicationDirectoryName.Any(char.IsControl) ||
-            applicationDirectoryName.IndexOfAny(['<', '>', ':', '"', '|', '?', '*']) >= 0)
+            applicationDirectoryName.IndexOfAny(['<', '>', ':', '"', '|', '?', '*']) >= 0 ||
+            WindowsReservedDirectoryNames.Contains(deviceName) ||
+            isNumberedDeviceName)
         {
             throw new ArgumentException(
                 "The application directory name must be one portable directory name, not a path.",

@@ -40,12 +40,65 @@ public sealed class ExternalConfigurationTests
     [InlineData("C:relative")]
     [InlineData("unsafe:name")]
     [InlineData("name.")]
+    [InlineData("CON")]
+    [InlineData("con")]
+    [InlineData("Con.txt")]
+    [InlineData("NUL.log")]
+    [InlineData("AUX")]
+    [InlineData("PRN.txt")]
+    [InlineData("COM1")]
+    [InlineData("com9.txt")]
+    [InlineData("LPT1")]
+    [InlineData("lPt9.log")]
+    [InlineData("COM¹")]
+    [InlineData("LPT².txt")]
     public void RejectsInvalidApplicationDirectoryNames(string applicationDirectoryName)
     {
         using var temporaryDirectory = new TemporaryDirectory();
 
         Assert.Throws<ArgumentException>(
             () => ExternalConfigurationLoader.ResolvePath(applicationDirectoryName, temporaryDirectory.Path));
+    }
+
+    [Theory]
+    [InlineData("Console")]
+    [InlineData("convention")]
+    [InlineData("COM0")]
+    [InlineData("COM10")]
+    [InlineData("COM10.txt")]
+    [InlineData("LPT10")]
+    [InlineData("NULS.txt")]
+    [InlineData("report.txt")]
+    public void AcceptsPortableDirectoryNamesThatAreNotWindowsDeviceNames(string applicationDirectoryName)
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+
+        var expected = Path.GetFullPath(Path.Combine(
+            temporaryDirectory.Path,
+            applicationDirectoryName,
+            "Config",
+            "application.json"));
+
+        Assert.Equal(expected, ExternalConfigurationLoader.ResolvePath(applicationDirectoryName, temporaryDirectory.Path));
+    }
+
+    [Fact]
+    public void InvalidFrameworkLogLevelFailsNormalStartupWithoutEchoingTheValue()
+    {
+        const string sentinel = "SECRET_LOG_LEVEL_SENTINEL";
+        using var temporaryDirectory = new TemporaryDirectory();
+        var filePath = temporaryDirectory.WriteConfiguration(
+            $$"""
+            { "Logging": { "LogLevel": { "Default": "{{sentinel}}" } } }
+            """);
+        var builder = CreateBuilder(temporaryDirectory.Path);
+
+        var error = Assert.Throws<InvalidOperationException>(() => StartApplication(builder, filePath));
+
+        Assert.Contains("Logging:LogLevel", error.Message);
+        Assert.Contains(filePath, error.Message);
+        Assert.Null(error.InnerException);
+        Assert.DoesNotContain(sentinel, error.ToString());
     }
 
     [Fact]
@@ -238,6 +291,12 @@ public sealed class ExternalConfigurationTests
             ContentRootPath = contentRoot,
             Args = args ?? []
         });
+    }
+
+    private static void StartApplication(WebApplicationBuilder builder, string configurationPath)
+    {
+        ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", configurationPath);
+        using var app = builder.Build();
     }
 
     private static byte[] EncodeWithBom(string text, string encodingName)

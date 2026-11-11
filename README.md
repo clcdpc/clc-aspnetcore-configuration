@@ -31,7 +31,7 @@ public static class Program
 }
 ```
 
-The application directory name belongs in `Program.cs` so the deployment convention is visible alongside startup. It must be one portable directory name. Absolute paths, path separators, traversal names, and invalid filename characters are rejected.
+The application directory name belongs in `Program.cs` so the deployment convention is visible alongside startup. It must be one portable directory name. Absolute paths, path separators, traversal names, invalid filename characters, and Windows reserved device names (including names followed by extensions) are rejected.
 
 ## File convention
 
@@ -71,11 +71,11 @@ The JSON root must be an object. Duplicate property names are rejected case-inse
 
 ## Failure behavior
 
-Startup fails immediately with an `InvalidOperationException` if the OS common application data directory is unavailable, the required file is missing or unreadable, or the file contains malformed JSON, duplicate keys, or unsupported encoding. The message identifies the configuration path and remediation while omitting values from the file and parser exceptions. The file is never rewritten.
+Startup fails immediately with an `InvalidOperationException` if the OS common application data directory is unavailable, the required file is missing or unreadable, or the file contains malformed JSON, duplicate keys, unsupported encoding, or invalid `Logging:LogLevel` values. The message identifies the configuration path and remediation while omitting values from the file and parser exceptions. The file is never rewritten.
 
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and builds and runs against that package from a temporary local feed.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and starts a host with an isolated configuration fixture and NuGet cache.
 
 ```text
 dotnet restore Clc.Configuration.slnx
