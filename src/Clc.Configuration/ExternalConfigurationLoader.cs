@@ -249,12 +249,35 @@ internal static class ExternalConfigurationLoader
 
     private static bool HasValidLoggingLevels(IReadOnlyDictionary<string, string?> configuration)
     {
-        return configuration.All(setting =>
-            setting.Value is null ||
-            !setting.Key.Contains(":LogLevel:", StringComparison.OrdinalIgnoreCase) ||
-            (Enum.TryParse<LogLevel>(setting.Value, ignoreCase: true, out var level) &&
-                Enum.IsDefined(level) &&
-                Enum.GetNames<LogLevel>().Contains(setting.Value, StringComparer.OrdinalIgnoreCase)));
+        foreach (var setting in configuration)
+        {
+            if (setting.Value is null || !IsFrameworkLoggingLevel(setting.Key))
+            {
+                continue;
+            }
+
+            if (!Enum.TryParse<LogLevel>(setting.Value, ignoreCase: true, out var level) ||
+                !Enum.IsDefined(level) ||
+                !Enum.GetNames<LogLevel>().Contains(setting.Value, StringComparer.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsFrameworkLoggingLevel(string key)
+    {
+        var segments = key.Split(':');
+        var isGlobalLevel = segments.Length == 3 &&
+                segments[0].Equals("Logging", StringComparison.OrdinalIgnoreCase) &&
+                segments[1].Equals("LogLevel", StringComparison.OrdinalIgnoreCase);
+        var isProviderLevel = segments.Length == 4 &&
+                segments[0].Equals("Logging", StringComparison.OrdinalIgnoreCase) &&
+                segments[2].Equals("LogLevel", StringComparison.OrdinalIgnoreCase);
+
+        return isGlobalLevel || isProviderLevel;
     }
 
     private static void ValidateApplicationDirectoryName(string applicationDirectoryName)

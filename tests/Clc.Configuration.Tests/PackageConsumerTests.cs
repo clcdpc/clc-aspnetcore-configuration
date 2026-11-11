@@ -9,8 +9,6 @@ public sealed class PackageConsumerTests
 {
     private const string FixtureConsumerProgram = """
         using System;
-        using System.IO;
-        using System.Reflection;
         using System.Threading.Tasks;
         using Clc.Configuration;
         using Microsoft.AspNetCore.Builder;
@@ -20,22 +18,14 @@ public sealed class PackageConsumerTests
         {
             public static async Task<int> Main(string[] args)
             {
-                if (args.Length != 1)
+                if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
                 {
-                    throw new ArgumentException("Expected the isolated configuration fixture path.");
+                    throw new ArgumentException("Expected the isolated application directory name.");
                 }
 
                 var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
                 builder.WebHost.UseUrls("http://127.0.0.1:0");
-
-                // The package intentionally exposes only the fixed ProgramData convention.
-                // This test-only harness uses its internal file-path seam for an isolated fixture.
-                var loader = typeof(ClcConfigurationBuilderExtensions).Assembly.GetType(
-                    "Clc.Configuration.ExternalConfigurationLoader",
-                    throwOnError: true)!;
-                var fixturePath = Path.Combine(args[0], "clc-package-consumer", "Config", "application.json");
-                var addFromFile = loader.GetMethod("AddFromFile", BindingFlags.Static | BindingFlags.NonPublic)!;
-                addFromFile.Invoke(null, [builder, "clc-package-consumer", fixturePath]);
+                builder.AddClcConfiguration(args[0]);
 
                 await using var app = builder.Build();
                 if (app.Configuration["Consumer:Fixture"] != "loaded-from-package")
@@ -55,18 +45,16 @@ public sealed class PackageConsumerTests
     public async Task PackedNuGetPackageLoadsAnIsolatedFixtureAndStartsAnIndependentConsumer()
     {
         using var temporaryDirectory = new TemporaryDirectory();
+        using var fixture = new CommonApplicationDataFixture();
+        fixture.WriteConfiguration("""
+            { "Consumer": { "Fixture": "loaded-from-package" } }
+            """);
+
         var packageFeed = Directory.CreateDirectory(Path.Combine(temporaryDirectory.Path, "feed")).FullName;
         var packageCache = Path.Combine(temporaryDirectory.Path, "nuget-cache");
         var consumerDirectory = Directory.CreateDirectory(Path.Combine(temporaryDirectory.Path, "consumer")).FullName;
         CopyConsumerProject(consumerDirectory);
         File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"), FixtureConsumerProgram);
-
-        var fixtureRoot = Directory.CreateDirectory(Path.Combine(temporaryDirectory.Path, "fixture")).FullName;
-        var fixturePath = Path.Combine(fixtureRoot, "clc-package-consumer", "Config", "application.json");
-        Directory.CreateDirectory(Path.GetDirectoryName(fixturePath)!);
-        File.WriteAllText(fixturePath, """
-            { "Consumer": { "Fixture": "loaded-from-package" } }
-            """);
 
         var configuration = GetBuildConfiguration();
         var repositoryRoot = FindRepositoryRoot();
@@ -104,7 +92,7 @@ public sealed class PackageConsumerTests
 
         var runResult = await RunDotnetAsync(
             consumerDirectory,
-            ["run", "--project", consumerProject, "--configuration", configuration, "--no-build", "--no-restore", "--", fixtureRoot],
+            ["run", "--project", consumerProject, "--configuration", configuration, "--no-build", "--no-restore", "--", fixture.ApplicationDirectoryName],
             packageCache);
 
         var output = runResult.StandardOutput + runResult.StandardError;
@@ -199,6 +187,75 @@ public sealed class PackageConsumerTests
     }
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
+
+    private sealed class CommonApplicationDataFixture : IDisposable
+    {
+        private readonly string _applicationDirectory;
+        private readonly string _configurationDirectory;
+        private readonly string _configurationPath;
+        private bool _ownsApplicationDirectory;
+        private bool _ownsConfigurationDirectory;
+        private bool _ownsConfigurationFile;
+
+        internal CommonApplicationDataFixture()
+        {
+            var commonApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            if (string.IsNullOrWhiteSpace(commonApplicationData) || !Path.IsPathFullyQualified(commonApplicationData))
+            {
+                throw new InvalidOperationException("The operating-system CommonApplicationData directory is unavailable; package smoke-test coverage requires it.");
+            }
+
+            ApplicationDirectoryName = $"clc-configuration-package-{Guid.NewGuid():N}";
+            _applicationDirectory = Path.Combine(commonApplicationData, ApplicationDirectoryName);
+            _configurationDirectory = Path.Combine(_applicationDirectory, "Config");
+            _configurationPath = Path.Combine(_configurationDirectory, "application.json");
+            if (Directory.Exists(_applicationDirectory) || File.Exists(_applicationDirectory))
+            {
+                throw new IOException($"The unique package smoke-test fixture path already exists; refusing to overwrite it: '{_applicationDirectory}'.");
+            }
+        }
+
+        internal string ApplicationDirectoryName { get; }
+
+        internal void WriteConfiguration(string json)
+        {
+            Directory.CreateDirectory(_applicationDirectory);
+            _ownsApplicationDirectory = true;
+            Directory.CreateDirectory(_configurationDirectory);
+            _ownsConfigurationDirectory = true;
+
+            using var file = new FileStream(_configurationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            _ownsConfigurationFile = true;
+            var bytes = Encoding.UTF8.GetBytes(json);
+            file.Write(bytes);
+        }
+
+        public void Dispose()
+        {
+            if (_ownsConfigurationFile && File.Exists(_configurationPath))
+            {
+                File.Delete(_configurationPath);
+            }
+
+            if (_ownsConfigurationDirectory && Directory.Exists(_configurationDirectory))
+            {
+                DeleteIfEmpty(_configurationDirectory);
+            }
+
+            if (_ownsApplicationDirectory && Directory.Exists(_applicationDirectory))
+            {
+                DeleteIfEmpty(_applicationDirectory);
+            }
+        }
+
+        private static void DeleteIfEmpty(string path)
+        {
+            if (!Directory.EnumerateFileSystemEntries(path).Any())
+            {
+                Directory.Delete(path);
+            }
+        }
+    }
 
     private sealed class TemporaryDirectory : IDisposable
     {

@@ -25,4 +25,12 @@ jobs:
           dotnet-version: 10.0.303
       - run: dotnet restore Clc.Configuration.slnx
       - run: dotnet build Clc.Configuration.slnx --configuration Release --no-restore
-      - run: dotnet test Clc.Configuration.slnx --configuration Release --no-build
+      - name: Test on Windows
+        if: runner.os == 'Windows'
+        run: dotnet test Clc.Configuration.slnx --configuration Release --no-build
+      - name: Test on Linux except the package consumer
+        if: runner.os == 'Linux'
+        run: dotnet test Clc.Configuration.slnx --configuration Release --no-build --filter "FullyQualifiedName!~Clc.Configuration.Tests.PackageConsumerTests"
+      - name: Test packed package consumer with CommonApplicationData access
+        if: runner.os == 'Linux'
+        run: sudo --preserve-env=PATH dotnet test Clc.Configuration.slnx --configuration Release --no-build --filter "FullyQualifiedName~Clc.Configuration.Tests.PackageConsumerTests"

@@ -82,15 +82,14 @@ public sealed class ExternalConfigurationTests
         Assert.Equal(expected, ExternalConfigurationLoader.ResolvePath(applicationDirectoryName, temporaryDirectory.Path));
     }
 
-    [Fact]
-    public void InvalidFrameworkLogLevelFailsNormalStartupWithoutEchoingTheValue()
+    [Theory]
+    [InlineData("""{ "Logging": { "LogLevel": { "Default": "SECRET_LOG_LEVEL_SENTINEL" } } }""")]
+    [InlineData("""{ "lOgGiNg": { "Console": { "lOgLeVeL": { "Default": "SECRET_LOG_LEVEL_SENTINEL" } } } }""")]
+    public void InvalidFrameworkLogLevelFailsNormalStartupWithoutEchoingTheValue(string json)
     {
         const string sentinel = "SECRET_LOG_LEVEL_SENTINEL";
         using var temporaryDirectory = new TemporaryDirectory();
-        var filePath = temporaryDirectory.WriteConfiguration(
-            $$"""
-            { "Logging": { "LogLevel": { "Default": "{{sentinel}}" } } }
-            """);
+        var filePath = temporaryDirectory.WriteConfiguration(json);
         var builder = CreateBuilder(temporaryDirectory.Path);
 
         var error = Assert.Throws<InvalidOperationException>(() => StartApplication(builder, filePath));
@@ -99,6 +98,38 @@ public sealed class ExternalConfigurationTests
         Assert.Contains(filePath, error.Message);
         Assert.Null(error.InnerException);
         Assert.DoesNotContain(sentinel, error.ToString());
+    }
+
+    [Theory]
+    [InlineData("""{ "Logging": { "LogLevel": { "Default": "Trace", "Microsoft": "Warning" } }, "Probe": "loaded" }""")]
+    [InlineData("""{ "Logging": { "Console": { "LogLevel": { "Default": "Debug", "System": "Information" } } }, "Probe": "loaded" }""")]
+    [InlineData("""{ "lOgGiNg": { "lOgLeVeL": { "dEfAuLt": "tRaCe", "mIcRoSoFt": "wArNiNg" }, "cOnSoLe": { "lOgLeVeL": { "Default": "eRrOr" } } }, "Probe": "loaded" }""")]
+    public void AcceptsValidFrameworkLogLevelsCaseInsensitively(string json)
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var filePath = temporaryDirectory.WriteConfiguration(json);
+        var builder = CreateBuilder(temporaryDirectory.Path);
+
+        ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath);
+
+        Assert.Equal("loaded", builder.Configuration["Probe"]);
+    }
+
+    [Theory]
+    [InlineData("""{ "Application": { "Logging": { "LogLevel": { "Default": "SECRET_APP_LEVEL" } } }, "Probe": "loaded" }""", "Application:Logging:LogLevel:Default")]
+    [InlineData("""{ "ApplicationLogging": { "LogLevel": { "Default": "SECRET_APP_LEVEL" } }, "Probe": "loaded" }""", "ApplicationLogging:LogLevel:Default")]
+    [InlineData("""{ "LoggingOptions": { "LogLevel": { "Default": "SECRET_APP_LEVEL" } }, "Probe": "loaded" }""", "LoggingOptions:LogLevel:Default")]
+    [InlineData("""{ "Logging": { "Feature": { "Options": { "LogLevel": { "Default": "SECRET_APP_LEVEL" } } } }, "Probe": "loaded" }""", "Logging:Feature:Options:LogLevel:Default")]
+    public void IgnoresUnrelatedApplicationLoggingNames(string json, string unrelatedLevelKey)
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var filePath = temporaryDirectory.WriteConfiguration(json);
+        var builder = CreateBuilder(temporaryDirectory.Path);
+
+        ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath);
+
+        Assert.Equal("loaded", builder.Configuration["Probe"]);
+        Assert.Equal("SECRET_APP_LEVEL", builder.Configuration[unrelatedLevelKey]);
     }
 
     [Fact]

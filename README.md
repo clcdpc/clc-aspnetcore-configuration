@@ -75,7 +75,7 @@ Startup fails immediately with an `InvalidOperationException` if the OS common a
 
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and starts a host with an isolated configuration fixture and NuGet cache.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and starts a host through the public `AddClcConfiguration` entry point. The package smoke test provisions a uniquely named fixture under the actual CommonApplicationData directory and uses an isolated NuGet package cache, so the test identity needs permission to create and remove that fixture.
 
 ```text
 dotnet restore Clc.Configuration.slnx
