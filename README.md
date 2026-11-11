@@ -2,7 +2,7 @@
 
 `Clc.Configuration` is a small ASP.NET Core library for loading an application's authoritative configuration from one `application.json` file under the operating system's ProgramData directory.
 
-The package is `Clc.Configuration` and the current package version is `0.1.0`.
+The package is `Clc.Configuration` and the current package version is `0.1.0-beta.1`.
 
 After the package is available from the application's configured NuGet feed, add that package version to the application project.
 
@@ -75,13 +75,44 @@ Startup fails immediately with an `InvalidOperationException` if the OS common a
 
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and starts a host through the public `AddClcConfiguration` entry point. The package smoke test provisions a uniquely named fixture under the actual CommonApplicationData directory and uses an isolated NuGet package cache, so the test identity needs permission to create and remove that fixture.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and starts a host through the public `AddClcConfiguration` entry point. The package smoke test confirms that the package and consumer reference the project version, checks the packed metadata and license/readme files, provisions a uniquely named fixture under the actual CommonApplicationData directory, and restores through an isolated NuGet package cache. The test identity needs permission to create and remove that fixture.
 
 ```text
 dotnet restore Clc.Configuration.slnx
 dotnet build Clc.Configuration.slnx --configuration Release --no-restore
 dotnet test Clc.Configuration.slnx --configuration Release --no-build
 ```
+
+## License and NuGet package
+
+This library is licensed under MIT. The repository's `LICENSE` file identifies Central Library Consortium as the copyright holder, and the package includes that file, the README, MIT license metadata, and the `clcdpc/clc-configuration` Git repository link.
+
+The NuGet ID `Clc.Configuration` returned no search results from the NuGet.org search API on 2026-11-11. This only checks indexed packages; it does not confirm that the ID or its prefix is unreserved. Before the first release, verify availability and the `Clc.` prefix policy in the CLC NuGet organization account.
+
+## NuGet trusted publishing setup
+
+The release workflow follows the CLC `rest-client` pattern. Its trusted-publishing login identity is the NuGet username `mfields`; the package owner is the `clcdpc` NuGet organization. Those values serve different roles. The package author metadata is `Central Library Consortium` and does not grant ownership.
+
+Before publishing the first package:
+
+1. In the `clcdpc` NuGet organization account, confirm the `Clc.Configuration` ID and `Clc.` prefix are available and that the package will be owned by `clcdpc`. The existing `Clc.Rest.Client` package is owned by `clcdpc`; verify the new package's owner list after its first upload as well.
+2. Add a NuGet.org trusted-publishing policy owned by the `clcdpc` organization for GitHub Actions. Set repository owner `clcdpc`, repository `clc-configuration`, workflow file `build.yml`, environment `nuget-production`, and scope the policy to `Clc.Configuration` where package scopes are available. Use the existing CLC login identity `mfields` in the workflow. No long-lived NuGet API key or GitHub secret is required.
+3. In GitHub repository settings, create the `nuget-production` environment. Restrict deployments to the workflow's version tags (`v*.*.*` and `v*.*.*-*`) and add any required reviewer protection for the CLC release process. The workflow grants `id-token: write` only to this publish job.
+
+The NuGet policy and GitHub environment above are setup requirements for this repository; they have not been created or verified here. For current policy steps, see [NuGet.org Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing).
+
+## Creating a beta release
+
+After this change is merged and the setup above is complete, publish the initial `0.1.0-beta.1` package by tagging the merged commit with the exact project version:
+
+```text
+git switch master
+git pull --ff-only
+git tag v0.1.0-beta.1
+git push origin v0.1.0-beta.1
+```
+
+No GitHub Release object is needed. The tag starts the Windows and Linux build/test checks, package validation, and artifact upload. The release tag must equal `v` plus the `<Version>` in the library project. The packed consumer restores the same version referenced in the sample project, using an isolated package cache. After checks pass, a separate publish job downloads the package and SHA-256 sidecar, verifies the checksum, enters `nuget-production`, and obtains a short-lived key through NuGet trusted publishing. Pull requests and ordinary branch pushes cannot publish. For later versions, update the library project, sample consumer package reference, and this README together before tagging the matching version.
 
 ## Adoption notes
 

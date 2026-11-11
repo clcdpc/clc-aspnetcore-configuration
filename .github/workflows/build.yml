@@ -1,16 +1,41 @@
-name: Build and test
+name: Build, test, pack, and publish
 
 on:
   pull_request:
+    branches:
+      - master
   push:
     branches:
       - master
+    tags:
+      - "v*.*.*"
+      - "v*.*.*-*"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_VERSION: 10.0.303
+  BUILD_CONFIGURATION: Release
+  PACKAGE_PROJECT: src/Clc.Configuration/Clc.Configuration.csproj
+  TEST_PROJECT: tests/Clc.Configuration.Tests/Clc.Configuration.Tests.csproj
+  PACKAGE_OUTPUT_DIR: artifacts/packages
+  NUGET_SOURCE: https://api.nuget.org/v3/index.json
+
 jobs:
-  build-and-test:
+  build-test:
+    name: build and test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -18,19 +43,147 @@ jobs:
           - ubuntu-latest
           - windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: 10.0.303
-      - run: dotnet restore Clc.Configuration.slnx
-      - run: dotnet build Clc.Configuration.slnx --configuration Release --no-restore
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Validate package version for this ref
+        run: |
+          package_version="$(dotnet msbuild "$PACKAGE_PROJECT" -getProperty:Version | tr -d '\r\n')"
+          if [[ -z "$package_version" ]]; then
+            echo "The package project does not define a version."
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v${package_version}" ]]; then
+            echo "Release tag '$GITHUB_REF_NAME' must match the project version as 'v${package_version}'."
+            exit 1
+          fi
+
+          echo "Validating package version ${package_version}."
+
+      - name: Restore with an isolated NuGet cache
+        env:
+          NUGET_PACKAGES: ${{ runner.temp }}/nuget-packages
+        run: dotnet restore Clc.Configuration.slnx
+
+      - name: Build
+        run: dotnet build Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-restore
+
       - name: Test on Windows
         if: runner.os == 'Windows'
-        run: dotnet test Clc.Configuration.slnx --configuration Release --no-build
+        run: dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore
+
       - name: Test on Linux except the package consumer
         if: runner.os == 'Linux'
-        run: dotnet test Clc.Configuration.slnx --configuration Release --no-build --filter "FullyQualifiedName!~Clc.Configuration.Tests.PackageConsumerTests"
+        run: dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore --filter "FullyQualifiedName!~Clc.Configuration.Tests.PackageConsumerTests"
+
       - name: Test packed package consumer with CommonApplicationData access
         if: runner.os == 'Linux'
-        run: sudo --preserve-env=PATH dotnet test Clc.Configuration.slnx --configuration Release --no-build --filter "FullyQualifiedName~Clc.Configuration.Tests.PackageConsumerTests"
+        run: sudo --preserve-env=PATH dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore --filter "FullyQualifiedName~Clc.Configuration.Tests.PackageConsumerTests"
+
+  package:
+    name: pack and retain NuGet artifact
+    runs-on: ubuntu-latest
+    needs: build-test
+    timeout-minutes: 10
+    outputs:
+      package_version: ${{ steps.version.outputs.package_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Validate package version for this ref
+        id: version
+        run: |
+          package_version="$(dotnet msbuild "$PACKAGE_PROJECT" -getProperty:Version | tr -d '\r\n')"
+          if [[ -z "$package_version" ]]; then
+            echo "The package project does not define a version."
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v${package_version}" ]]; then
+            echo "Release tag '$GITHUB_REF_NAME' must match the project version as 'v${package_version}'."
+            exit 1
+          fi
+
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore with an isolated NuGet cache
+        env:
+          NUGET_PACKAGES: ${{ runner.temp }}/nuget-packages
+        run: dotnet restore "$PACKAGE_PROJECT"
+
+      - name: Pack
+        run: dotnet pack "$PACKAGE_PROJECT" --configuration "$BUILD_CONFIGURATION" --no-restore --output "$PACKAGE_OUTPUT_DIR"
+
+      - name: Validate package metadata and write checksum
+        run: python3 scripts/validate_nuget_package.py --package "$PACKAGE_OUTPUT_DIR/Clc.Configuration.${{ steps.version.outputs.package_version }}.nupkg" --version "${{ steps.version.outputs.package_version }}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: clc-configuration-${{ steps.version.outputs.package_version }}
+          if-no-files-found: error
+          path: ${{ env.PACKAGE_OUTPUT_DIR }}/Clc.Configuration.${{ steps.version.outputs.package_version }}.nupkg*
+
+  publish:
+    name: publish package to nuget.org
+    runs-on: ubuntu-latest
+    needs: package
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    timeout-minutes: 10
+    environment: nuget-production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PACKAGE_VERSION: ${{ needs.package.outputs.package_version }}
+      PACKAGE_FILE: Clc.Configuration.${{ needs.package.outputs.package_version }}.nupkg
+
+    steps:
+      - name: Download verified package artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: clc-configuration-${{ needs.package.outputs.package_version }}
+          path: ${{ env.PACKAGE_OUTPUT_DIR }}
+
+      - name: Verify package checksum and release tag
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "v${PACKAGE_VERSION}" ]]; then
+            echo "Release tag '$GITHUB_REF_NAME' does not match package version '${PACKAGE_VERSION}'."
+            exit 1
+          fi
+
+          cd "$PACKAGE_OUTPUT_DIR"
+          test -s "$PACKAGE_FILE"
+          sha256sum --check "$PACKAGE_FILE.sha256"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Login to NuGet with trusted publishing
+        id: nuget-login
+        uses: NuGet/login@v1
+        with:
+          user: mfields
+
+      - name: Publish package to nuget.org
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: dotnet nuget push "$PACKAGE_OUTPUT_DIR/$PACKAGE_FILE" --api-key "$NUGET_API_KEY" --source "$NUGET_SOURCE" --skip-duplicate
