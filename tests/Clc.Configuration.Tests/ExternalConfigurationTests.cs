@@ -83,11 +83,13 @@ public sealed class ExternalConfigurationTests
     }
 
     [Theory]
-    [InlineData("""{ "Logging": { "LogLevel": { "Default": "SECRET_LOG_LEVEL_SENTINEL" } } }""")]
-    [InlineData("""{ "lOgGiNg": { "Console": { "lOgLeVeL": { "Default": "SECRET_LOG_LEVEL_SENTINEL" } } } }""")]
-    public void InvalidFrameworkLogLevelFailsNormalStartupWithoutEchoingTheValue(string json)
+    [InlineData("""{ "Logging": { "LogLevel": { "Default": "SECRET_LOG_LEVEL_SENTINEL" } } }""", "SECRET_LOG_LEVEL_SENTINEL")]
+    [InlineData("""{ "lOgGiNg": { "Console": { "lOgLeVeL": { "Default": "SECRET_LOG_LEVEL_SENTINEL" } } } }""", "SECRET_LOG_LEVEL_SENTINEL")]
+    [InlineData("""{ "Logging": { "LogLevel": { "Microsoft": { "Hosting": { "Lifetime": "SECRET_NESTED_GLOBAL_LOG_LEVEL_SENTINEL" } } } } }""", "SECRET_NESTED_GLOBAL_LOG_LEVEL_SENTINEL")]
+    [InlineData("""{ "Logging": { "Console": { "LogLevel": { "Microsoft": { "Hosting": { "Lifetime": "SECRET_NESTED_PROVIDER_LOG_LEVEL_SENTINEL" } } } } } }""", "SECRET_NESTED_PROVIDER_LOG_LEVEL_SENTINEL")]
+    [InlineData("""{ "Logging": { "LogLevel": { "Microsoft": { "Hosting": [ "Information", "SECRET_ARRAY_LOG_LEVEL_SENTINEL" ] } } } }""", "SECRET_ARRAY_LOG_LEVEL_SENTINEL")]
+    public void InvalidFrameworkLogLevelFailsNormalStartupWithoutEchoingTheValue(string json, string sentinel)
     {
-        const string sentinel = "SECRET_LOG_LEVEL_SENTINEL";
         using var temporaryDirectory = new TemporaryDirectory();
         var filePath = temporaryDirectory.WriteConfiguration(json);
         var builder = CreateBuilder(temporaryDirectory.Path);

@@ -270,10 +270,12 @@ internal static class ExternalConfigurationLoader
     private static bool IsFrameworkLoggingLevel(string key)
     {
         var segments = key.Split(':');
-        var isGlobalLevel = segments.Length == 3 &&
+        // LoggerFilterConfigureOptions enumerates each LogLevel section recursively, so
+        // descendants beyond the usual category key (including array indexes) are levels too.
+        var isGlobalLevel = segments.Length >= 3 &&
                 segments[0].Equals("Logging", StringComparison.OrdinalIgnoreCase) &&
                 segments[1].Equals("LogLevel", StringComparison.OrdinalIgnoreCase);
-        var isProviderLevel = segments.Length == 4 &&
+        var isProviderLevel = segments.Length >= 4 &&
                 segments[0].Equals("Logging", StringComparison.OrdinalIgnoreCase) &&
                 segments[2].Equals("LogLevel", StringComparison.OrdinalIgnoreCase);
 
