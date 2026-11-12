@@ -15,8 +15,14 @@ public static class Program
 {
     private const string ApplicationDirectoryName = "clc-ssrs-web";
 
-    public static void Main(string[] args)
+    public static int Main(string[] args)
     {
+        // Optional: opt in before logging, host construction, or configuration reads.
+        if (ClcConfigurationCommandLine.TryHandle(args, ApplicationDirectoryName, out var exitCode))
+        {
+            return exitCode;
+        }
+
         var builder = WebApplication.CreateBuilder(args);
         builder.AddClcConfiguration(ApplicationDirectoryName);
 
@@ -25,6 +31,7 @@ public static class Program
 
         var app = builder.Build();
         app.Run();
+        return 0;
     }
 }
 ```
@@ -42,6 +49,30 @@ The library resolves the OS-level `Environment.SpecialFolder.CommonApplicationDa
 For example, `AddClcConfiguration("clc-ssrs-web")` reads the `clc-ssrs-web/Config/application.json` file beneath ProgramData on Windows and the common application data directory on Linux. The same path is used in every ASP.NET Core environment. The library does not select environment-specific files, create a replacement file, or provide a production path override.
 
 Provision `application.json` before starting the application and grant the application identity read access. The library does not ship or copy operational settings into the application directory.
+
+## Application data paths and command-line discovery
+
+`ClcApplicationPaths.Resolve(ApplicationDirectoryName)` returns absolute `ApplicationDataDirectory`, `ConfigurationDirectory`, and `ConfigurationFilePath` properties using the same resolver and directory-name validation as normal startup. The application data directory is `<CommonApplicationData>/<application directory name>`, not the executable or content directory. Resolution neither reads configuration nor creates files or directories; it works before `application.json` is provisioned. It does not establish existence, access permissions, or deployment readiness. Logs, keys, ACLs, and provisioning remain application-owned.
+
+Applications can explicitly opt in with the early `TryHandle` call shown above. On `true`, return its exit code immediately, including failures. Do not put this call after logger initialization or `WebApplication.CreateBuilder`; `AddClcConfiguration` does not automatically handle commands or terminate the process.
+
+Run a trusted, complete published application on the target machine:
+
+```text
+dotnet "<publish directory>/MyApplication.dll" --clc-appdata-directory
+```
+
+The exact, case-sensitive standalone flag prints only the absolute application data directory plus a newline on stdout and exits successfully. It does not start the host, load configuration, or initialize logging. Extra arguments, duplicate flags, or `=value` / `:value` forms produce a fixed stderr message and exit code `2`; path resolution failure produces a fixed stderr message and exit code `1`. Other arguments are untouched and return `false` so the app can continue normally. The library never calls `Environment.Exit`.
+
+PowerShell can capture the result without loading .NET assemblies into its own process:
+
+```powershell
+$appDataDirectory = & dotnet $applicationDll --clc-appdata-directory
+if ($LASTEXITCODE -ne 0) { throw 'Application data directory discovery failed.' }
+$configurationPath = Join-Path $appDataDirectory 'Config/application.json'
+```
+
+Use a known command-capable application version, not an older binary that may ignore an unsupported flag. Invocation requires that published app's compatible runtime (unless self-contained) and reports the invoked binary's convention on the current OS, not another running deployment's state. It can run separately while IIS hosts the app; no service identity, configuration secrets, or running web server are required for discovery.
 
 ## Provider behavior
 
@@ -147,7 +178,7 @@ public sealed class PortalFactory : WebApplicationFactory<Program>
 
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, malformed escaped property names, redacted errors, disposable fixture cleanup, and package-backed public API usage. A real `WebApplicationFactory.CreateClient` integration test confirms that isolated test settings replace earlier providers while listener settings remain available; it does not create a conventional configuration file. The packed-package smoke test verifies package metadata, checks the public startup extension against a unique missing path without creating it, loads a temporary JSON fixture through the hostless reader, and starts a consumer host with isolated test settings. All test fixtures stay in temporary directories; tests do not write to machine ProgramData.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, malformed escaped property names, redacted errors, disposable fixture cleanup, and package-backed public API usage. A real `WebApplicationFactory.CreateClient` integration test confirms that isolated test settings replace earlier providers while listener settings remain available; it does not create a conventional configuration file. The packed-package smoke test publishes a package-backed consumer and runs discovery and malformed-command checks as separate processes on Windows and Linux, before any conventional configuration exists. It verifies exact stdout/stderr, exit codes, and that discovery leaves the application data directory absent. It also verifies package metadata, checks the public startup extension against a unique missing path without creating it, loads a temporary JSON fixture through the hostless reader, and starts a consumer host with isolated test settings. All test fixtures stay in temporary directories; tests do not write to machine ProgramData.
 
 ```text
 dotnet restore Clc.Configuration.slnx

@@ -23,8 +23,16 @@ public sealed class PackageConsumerTests
 
         public static class Program
         {
+            private const string ApplicationDirectoryName = "APPLICATION_DIRECTORY_NAME_PLACEHOLDER";
+
             public static async Task<int> Main(string[] args)
             {
+                // Discovery must return before any host, config, logging, or fixture setup.
+                if (ClcConfigurationCommandLine.TryHandle(args, ApplicationDirectoryName, out var exitCode))
+                {
+                    return exitCode;
+                }
+
                 if (args.Length != 0)
                 {
                     throw new ArgumentException("This isolated package consumer does not accept arguments.");
@@ -36,7 +44,7 @@ public sealed class PackageConsumerTests
                     throw new InvalidOperationException("The operating-system CommonApplicationData directory is unavailable.");
                 }
 
-                var applicationDirectoryName = $"clc-package-consumer-{Guid.NewGuid():N}";
+                var applicationDirectoryName = ApplicationDirectoryName;
                 var applicationDirectory = Path.Combine(commonApplicationData, applicationDirectoryName);
                 var configurationPath = Path.Combine(applicationDirectory, "Config", "application.json");
                 if (Directory.Exists(applicationDirectory) || File.Exists(applicationDirectory) || File.Exists(configurationPath))
@@ -137,7 +145,11 @@ public sealed class PackageConsumerTests
         var libraryProject = Path.Combine(repositoryRoot, "src", "Clc.Configuration", "Clc.Configuration.csproj");
         var expectedPackageVersion = ResolvePackageVersion();
         CopyConsumerProject(consumerDirectory, expectedPackageVersion);
-        File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"), FixtureConsumerProgram);
+        var applicationDirectoryName = $"clc-package-consumer-{Guid.NewGuid():N}";
+        var paths = ClcApplicationPaths.Resolve(applicationDirectoryName);
+        Assert.False(Directory.Exists(paths.ApplicationDataDirectory));
+        File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"),
+            FixtureConsumerProgram.Replace("APPLICATION_DIRECTORY_NAME_PLACEHOLDER", applicationDirectoryName));
         Assert.Equal(expectedPackageVersion, GetConsumerPackageVersion(consumerDirectory));
         var consumerProject = Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj");
 
@@ -198,6 +210,44 @@ public sealed class PackageConsumerTests
             ],
             packageCache);
 
+        // Publish and invoke the actual package-backed binary, not dotnet run. This also
+        // runs in CI on both Windows and Linux, before any conventional file exists.
+        var publishDirectory = Path.Combine(temporaryDirectory.Path, "published consumer");
+        await RunDotnetAsync(
+            consumerDirectory,
+            [
+                "publish", consumerProject, "--configuration", configuration, "--no-build", "--no-restore",
+                "--output", publishDirectory,
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
+            packageCache);
+        var assembly = Path.Combine(publishDirectory, "Clc.Configuration.Consumer.dll");
+        var filesBefore = Directory.GetFiles(publishDirectory, "*", SearchOption.AllDirectories).Order().ToArray();
+        var discovery = await RunDotnetAsync(
+            temporaryDirectory.Path, [assembly, "--clc-appdata-directory"], packageCache);
+        Assert.Equal(paths.ApplicationDataDirectory + Environment.NewLine, discovery.StandardOutput);
+        Assert.Empty(discovery.StandardError);
+
+        foreach (var arguments in new string[][]
+        {
+            ["--clc-appdata-directory", "SECRET"],
+            ["SECRET", "--clc-appdata-directory"],
+            ["--clc-appdata-directory", "--clc-appdata-directory"],
+            ["--clc-appdata-directory=SECRET"],
+            ["--clc-appdata-directory:SECRET"]
+        })
+        {
+            var invalid = await RunDotnetAsync(
+                temporaryDirectory.Path, [assembly, .. arguments], packageCache, expectedExitCode: 2);
+            Assert.Empty(invalid.StandardOutput);
+            Assert.Equal("Use --clc-appdata-directory alone, without a value or other arguments." + Environment.NewLine,
+                invalid.StandardError);
+        }
+
+        Assert.False(Directory.Exists(paths.ApplicationDataDirectory));
+        Assert.False(File.Exists(paths.ConfigurationFilePath));
+        Assert.Equal(filesBefore, Directory.GetFiles(publishDirectory, "*", SearchOption.AllDirectories).Order().ToArray());
+
         var runResult = await RunDotnetAsync(
             consumerDirectory,
             [
@@ -214,7 +264,8 @@ public sealed class PackageConsumerTests
     private static async Task<ProcessResult> RunDotnetAsync(
         string workingDirectory,
         IReadOnlyList<string> arguments,
-        string packageCache)
+        string packageCache,
+        int expectedExitCode = 0)
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
@@ -238,12 +289,21 @@ public sealed class PackageConsumerTests
         var outputTask = ReadToEndAsync(process.StandardOutput, standardOutput);
         var errorTask = ReadToEndAsync(process.StandardError, standardError);
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(3));
-        await process.WaitForExitAsync(timeout.Token);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            throw new TimeoutException("The package consumer process did not exit within three minutes.");
+        }
         await Task.WhenAll(outputTask, errorTask);
 
         var result = new ProcessResult(process.ExitCode, standardOutput.ToString(), standardError.ToString());
         Assert.True(
-            result.ExitCode == 0,
+            result.ExitCode == expectedExitCode,
             $"dotnet {string.Join(' ', arguments)} exited with {result.ExitCode}.{Environment.NewLine}{result.StandardOutput}{result.StandardError}");
         return result;
     }
