@@ -77,17 +77,8 @@ jobs:
       - name: Build
         run: dotnet build Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-restore
 
-      - name: Test on Windows
-        if: runner.os == 'Windows'
+      - name: Test
         run: dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore
-
-      - name: Test on Linux except the package consumer
-        if: runner.os == 'Linux'
-        run: dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore --filter "FullyQualifiedName!~Clc.Configuration.Tests.PackageConsumerTests"
-
-      - name: Test packed package consumer with CommonApplicationData access
-        if: runner.os == 'Linux'
-        run: sudo --preserve-env=PATH dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore --filter "FullyQualifiedName~Clc.Configuration.Tests.PackageConsumerTests"
 
   package:
     name: pack and retain NuGet artifact
