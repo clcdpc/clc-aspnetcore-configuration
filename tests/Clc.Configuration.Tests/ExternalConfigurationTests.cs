@@ -1,8 +1,10 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
+using Clc.Configuration.Testing;
 
 namespace Clc.Configuration.Tests;
 
@@ -94,9 +96,10 @@ public sealed class ExternalConfigurationTests
         var filePath = temporaryDirectory.WriteConfiguration(json);
         var builder = CreateBuilder(temporaryDirectory.Path);
 
-        var error = Assert.Throws<InvalidOperationException>(() => StartApplication(builder, filePath));
+        var error = Assert.Throws<ClcConfigurationException>(() => StartApplication(builder, filePath));
 
-        Assert.Contains("Logging:LogLevel", error.Message);
+        Assert.Equal(ClcConfigurationErrorReason.InvalidFrameworkLogLevel, error.Reason);
+        Assert.Contains("framework logging levels", error.Message);
         Assert.Contains(filePath, error.Message);
         Assert.Null(error.InnerException);
         Assert.DoesNotContain(sentinel, error.ToString());
@@ -237,9 +240,10 @@ public sealed class ExternalConfigurationTests
         var filePath = temporaryDirectory.WriteConfiguration(bytes);
         var builder = CreateBuilder(temporaryDirectory.Path);
 
-        var error = Assert.Throws<InvalidOperationException>(
+        var error = Assert.Throws<ClcConfigurationException>(
             () => ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath));
 
+        Assert.Equal(ClcConfigurationErrorReason.InvalidEncoding, error.Reason);
         Assert.Contains("unsupported text encoding", error.Message);
         Assert.Null(error.InnerException);
         Assert.DoesNotContain("SECRET_ENCODING_SENTINEL", error.ToString());
@@ -253,7 +257,7 @@ public sealed class ExternalConfigurationTests
         var filePath = Path.Combine(temporaryDirectory.Path, "missing", "application.json");
         var builder = CreateBuilder(temporaryDirectory.Path);
 
-        var error = Assert.Throws<InvalidOperationException>(
+        var error = Assert.Throws<ClcConfigurationException>(
             () => ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath));
 
         Assert.Contains("Required external application configuration file is missing", error.Message);
@@ -270,32 +274,76 @@ public sealed class ExternalConfigurationTests
             "{\"Credentials\":{\"Secret\":\"SECRET_JSON_SENTINEL\"}, SECRET_PARSE_SENTINEL }");
         var builder = CreateBuilder(temporaryDirectory.Path);
 
-        var error = Assert.Throws<InvalidOperationException>(
+        var error = Assert.Throws<ClcConfigurationException>(
             () => ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath));
 
-        Assert.Contains("invalid JSON", error.Message);
+        Assert.Equal(ClcConfigurationErrorReason.MalformedJson, Assert.IsType<ClcConfigurationException>(error).Reason);
         Assert.Contains("restart", error.Message);
         Assert.Null(error.InnerException);
         Assert.DoesNotContain("SECRET_", error.ToString());
     }
 
     [Theory]
-    [InlineData("{\"Key\":\"SECRET_ONE\",\"Key\":\"SECRET_TWO\"}")]
-    [InlineData("{\"Section\":{\"Key\":\"SECRET_ONE\",\"key\":\"SECRET_TWO\"}}")]
-    [InlineData("{\"Section\":{\"Nested\":[{\"Key\":\"SECRET_ONE\",\"KEY\":\"SECRET_TWO\"}]}}")]
-    [InlineData("{\"Section:Nested\":\"SECRET_ONE\"}")]
-    public void DuplicateOrAmbiguousJsonKeysFailWithoutExposingValues(string json)
+    [InlineData("{\"Key\":\"SECRET_ONE\",\"Key\":\"SECRET_TWO\"}", ClcConfigurationErrorReason.DuplicateKey)]
+    [InlineData("{\"Section\":{\"Key\":\"SECRET_ONE\",\"key\":\"SECRET_TWO\"}}", ClcConfigurationErrorReason.DuplicateKey)]
+    [InlineData("{\"Section\":{\"Nested\":[{\"Key\":\"SECRET_ONE\",\"KEY\":\"SECRET_TWO\"}]}}", ClcConfigurationErrorReason.DuplicateKey)]
+    [InlineData("{\"Section\":{\"Nested\":[[{\"Key\":\"SECRET_ONE\",\"KEY\":\"SECRET_TWO\"}]]}}", ClcConfigurationErrorReason.DuplicateKey)]
+    [InlineData("{\"Section:Nested\":\"SECRET_ONE\"}", ClcConfigurationErrorReason.AmbiguousKey)]
+    [InlineData("{\"\":\"SECRET_EMPTY_KEY\"}", ClcConfigurationErrorReason.AmbiguousKey)]
+    public void DuplicateOrAmbiguousJsonKeysFailWithoutExposingValues(
+        string json,
+        ClcConfigurationErrorReason expectedReason)
     {
         using var temporaryDirectory = new TemporaryDirectory();
         var filePath = temporaryDirectory.WriteConfiguration(json);
         var builder = CreateBuilder(temporaryDirectory.Path);
 
-        var error = Assert.Throws<InvalidOperationException>(
+        var error = Assert.Throws<ClcConfigurationException>(
             () => ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath));
 
-        Assert.Contains("duplicate keys", error.Message);
+        Assert.Equal(expectedReason, error.Reason);
         Assert.Null(error.InnerException);
         Assert.DoesNotContain("SECRET_", error.ToString());
+        Assert.DoesNotContain("Section", error.ToString());
+    }
+
+    [Theory]
+    [InlineData("\\uD800", false)]
+    [InlineData("\\uDC00", false)]
+    [InlineData("\\uD800", true)]
+    public void MalformedEscapedPropertyNamesFailNormalStartupWithSafeDiagnostics(
+        string escapedSurrogate,
+        bool nestedInArray)
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var json = CreateMalformedEscapedPropertyNameJson(escapedSurrogate, nestedInArray);
+        var filePath = temporaryDirectory.WriteConfiguration(json);
+        var parserMessage = GetPropertyNameParserMessage(json, nestedInArray);
+        var builder = CreateBuilder(temporaryDirectory.Path);
+
+        var error = Assert.Throws<ClcConfigurationException>(
+            () => ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath));
+
+        AssertMalformedPropertyNameDiagnostics(error, filePath, parserMessage);
+    }
+
+    [Theory]
+    [InlineData("\\uD800", false)]
+    [InlineData("\\uDC00", false)]
+    [InlineData("\\uD800", true)]
+    public void MalformedEscapedPropertyNamesFailHostlessReadWithSafeDiagnostics(
+        string escapedSurrogate,
+        bool nestedInArray)
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var json = CreateMalformedEscapedPropertyNameJson(escapedSurrogate, nestedInArray);
+        var filePath = temporaryDirectory.WriteConfiguration(json);
+        var parserMessage = GetPropertyNameParserMessage(json, nestedInArray);
+
+        var error = Assert.Throws<ClcConfigurationException>(
+            () => ClcConfigurationReader.LoadFromFile("clc-test-app", filePath));
+
+        AssertMalformedPropertyNameDiagnostics(error, filePath, parserMessage);
     }
 
     [Theory]
@@ -309,11 +357,201 @@ public sealed class ExternalConfigurationTests
         var filePath = temporaryDirectory.WriteConfiguration(json);
         var builder = CreateBuilder(temporaryDirectory.Path);
 
-        var error = Assert.Throws<InvalidOperationException>(
+        var error = Assert.Throws<ClcConfigurationException>(
             () => ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath));
 
-        Assert.Contains("invalid JSON", error.Message);
+        Assert.Contains("JSON object at its root", error.Message);
+        Assert.Equal(ClcConfigurationErrorReason.InvalidRootShape, error.Reason);
         Assert.Null(error.InnerException);
+    }
+
+    [Fact]
+    public void HostlessAndStartupReadersUseTheSameValidatedSnapshot()
+    {
+        using var fixture = ClcConfigurationTesting.CreateJsonFile("""
+            // deployment validation accepts comments and trailing commas
+            { "Portal": { "Enabled": true, }, "Probe": "same-snapshot", }
+            """);
+        var filePath = fixture.FilePath;
+
+        var hostless = ClcConfigurationReader.LoadFromFile("clc-test-app", filePath);
+        var builder = CreateBuilder(Path.GetDirectoryName(filePath)!);
+        ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath);
+
+        Assert.Equal("True", hostless["Portal:Enabled"]);
+        Assert.Equal("True", builder.Configuration["Portal:Enabled"]);
+        Assert.Equal("same-snapshot", hostless["Probe"]);
+        Assert.Equal("same-snapshot", builder.Configuration["Probe"]);
+
+        File.WriteAllText(filePath, "{\"Probe\":\"changed-after-validation\"}");
+        Assert.Equal("same-snapshot", hostless["Probe"]);
+        Assert.Equal("same-snapshot", builder.Configuration["Probe"]);
+    }
+
+    [Fact]
+    public void PublicTestingHelperReplacesProvidersAndRetainsListenerPrecedence()
+    {
+        var configurationBuilder = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Prior:Secret"] = "SECRET_PRIOR_PROVIDER",
+                [WebHostDefaults.ServerUrlsKey] = "http://127.0.0.1:50123",
+                ["http_ports"] = "8081",
+                ["https_ports"] = "8444",
+                [WebHostDefaults.PreferHostingUrlsKey] = "true"
+            });
+        var settings = new Dictionary<string, string?>
+        {
+            ["Test:Value"] = "in-memory",
+            [WebHostDefaults.ServerUrlsKey] = "http://127.0.0.1:50999"
+        };
+
+        configurationBuilder.AddClcConfigurationForTesting(settings);
+        var configuration = configurationBuilder.Build();
+
+        Assert.Equal("in-memory", configuration["Test:Value"]);
+        Assert.Null(configuration["Prior:Secret"]);
+        Assert.Equal("http://127.0.0.1:50999", configuration[WebHostDefaults.ServerUrlsKey]);
+        Assert.Equal("8081", configuration["http_ports"]);
+        Assert.Equal("8444", configuration["https_ports"]);
+        Assert.Equal("true", configuration[WebHostDefaults.PreferHostingUrlsKey]);
+    }
+
+    [Fact]
+    public void PublicJsonFixtureIsUniqueAndDeletesItsOwnedDirectory()
+    {
+        var first = ClcConfigurationTesting.CreateJsonFile("{\"Fixture\":\"one\"}");
+        var second = ClcConfigurationTesting.CreateJsonFile("{\"Fixture\":\"two\"}");
+        var firstPath = first.FilePath;
+        var secondPath = second.FilePath;
+        var firstDirectory = Path.GetDirectoryName(firstPath)!;
+        var secondDirectory = Path.GetDirectoryName(secondPath)!;
+
+        try
+        {
+            Assert.NotEqual(firstPath, secondPath);
+            Assert.NotEqual(firstDirectory, secondDirectory);
+            Assert.Equal("one", ClcConfigurationReader.LoadFromFile("clc-test-app", firstPath)["Fixture"]);
+            Assert.Equal("two", ClcConfigurationReader.LoadFromFile("clc-test-app", secondPath)["Fixture"]);
+        }
+        finally
+        {
+            first.Dispose();
+            second.Dispose();
+        }
+
+        Assert.False(File.Exists(firstPath));
+        Assert.False(Directory.Exists(firstDirectory));
+        Assert.False(File.Exists(secondPath));
+        Assert.False(Directory.Exists(secondDirectory));
+    }
+
+    [Fact]
+    public void StructuredJsonErrorIncludesOnlySafePathAndNumericLocation()
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var filePath = temporaryDirectory.WriteConfiguration(
+            "{\n  \"Password\": \"SECRET_DIAGNOSTIC_SENTINEL\",\n  invalid }\n");
+
+        var error = Assert.Throws<ClcConfigurationException>(
+            () => ClcConfigurationReader.LoadFromFile("clc-test-app", filePath));
+
+        Assert.Equal(ClcConfigurationErrorReason.MalformedJson, error.Reason);
+        Assert.Equal(filePath, error.FilePath);
+        Assert.True(error.LineNumber >= 1);
+        Assert.True(error.ColumnNumber >= 1);
+        Assert.Contains($"line {error.LineNumber}, column {error.ColumnNumber}", error.Message);
+        Assert.Null(error.InnerException);
+        Assert.DoesNotContain("SECRET_DIAGNOSTIC_SENTINEL", error.ToString());
+        Assert.DoesNotContain("Password", error.ToString());
+    }
+
+    [Fact]
+    public void MissingAndUnreadableFilesHaveDistinctStructuredReasons()
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var missingPath = Path.Combine(temporaryDirectory.Path, "missing.json");
+        var missing = Assert.Throws<ClcConfigurationException>(
+            () => ClcConfigurationReader.LoadFromFile("clc-test-app", missingPath));
+
+        var directoryPath = Path.Combine(temporaryDirectory.Path, "directory.json");
+        Directory.CreateDirectory(directoryPath);
+        var unreadable = Assert.Throws<ClcConfigurationException>(
+            () => ClcConfigurationReader.LoadFromFile("clc-test-app", directoryPath));
+
+        Assert.Equal(ClcConfigurationErrorReason.MissingFile, missing.Reason);
+        Assert.Equal(ClcConfigurationErrorReason.UnreadableFile, unreadable.Reason);
+        Assert.Null(missing.InnerException);
+        Assert.Null(unreadable.InnerException);
+    }
+
+    [Fact]
+    public void SizeLimitAcceptsTheBoundaryAndRejectsTheFirstByteOverIt()
+    {
+        using var atLimit = ClcConfigurationTesting.CreateJsonFile(
+            Encoding.UTF8.GetBytes(new string(' ', ExternalConfigurationLoader.MaximumConfigurationBytes - 2) + "{}"));
+        using var overLimit = ClcConfigurationTesting.CreateJsonFile(
+            Encoding.UTF8.GetBytes(new string(' ', ExternalConfigurationLoader.MaximumConfigurationBytes - 1) + "{}"));
+
+        Assert.Empty(ClcConfigurationReader.LoadFromFile("clc-test-app", atLimit.FilePath).GetChildren());
+        var error = Assert.Throws<ClcConfigurationException>(
+            () => ClcConfigurationReader.LoadFromFile("clc-test-app", overLimit.FilePath));
+        Assert.Equal(ClcConfigurationErrorReason.SizeLimitExceeded, error.Reason);
+        Assert.Contains("4 MiB", error.Message);
+    }
+
+    [Fact]
+    public void DepthLimitAcceptsTheBoundaryAndRejectsTheNextLevel()
+    {
+        using var atLimit = ClcConfigurationTesting.CreateJsonFile(
+            CreateNestedArrayJson(31));
+        using var overLimit = ClcConfigurationTesting.CreateJsonFile(
+            CreateNestedArrayJson(32));
+        const int acceptedArrayDepth = 31;
+
+        var key = "Nested:" + string.Join(':', Enumerable.Repeat("0", acceptedArrayDepth));
+        Assert.Equal("0", ClcConfigurationReader.LoadFromFile("clc-test-app", atLimit.FilePath)[key]);
+        var error = Assert.Throws<ClcConfigurationException>(
+            () => ClcConfigurationReader.LoadFromFile("clc-test-app", overLimit.FilePath));
+        Assert.Equal(ClcConfigurationErrorReason.DepthLimitExceeded, error.Reason);
+    }
+
+    private static string CreateNestedArrayJson(int arrayDepth) =>
+        "{\"Nested\":" + new string('[', arrayDepth) + "0" + new string(']', arrayDepth) + "}";
+
+    private static string CreateMalformedEscapedPropertyNameJson(string escapedSurrogate, bool nestedInArray)
+    {
+        var property = "\"SECRET_PROPERTY_NAME_SENTINEL" + escapedSurrogate + "\":\"SECRET_VALUE_SENTINEL\"";
+        return nestedInArray ? "{\"Nested\":[{" + property + "}]}" : "{" + property + "}";
+    }
+
+    private static string GetPropertyNameParserMessage(string json, bool nestedInArray)
+    {
+        using var document = JsonDocument.Parse(json);
+        var element = nestedInArray
+            ? document.RootElement.GetProperty("Nested").EnumerateArray().Single()
+            : document.RootElement;
+        var property = Assert.Single(element.EnumerateObject());
+        var parserException = Assert.Throws<InvalidOperationException>(() => _ = property.Name);
+        Assert.False(string.IsNullOrEmpty(parserException.Message));
+        return parserException.Message;
+    }
+
+    private static void AssertMalformedPropertyNameDiagnostics(
+        ClcConfigurationException error,
+        string filePath,
+        string parserMessage)
+    {
+        Assert.Equal(ClcConfigurationErrorReason.MalformedJson, error.Reason);
+        Assert.Equal(filePath, error.FilePath);
+        Assert.Contains(filePath, error.Message);
+        Assert.Null(error.InnerException);
+        Assert.DoesNotContain("SECRET_PROPERTY_NAME_SENTINEL", error.Message);
+        Assert.DoesNotContain("SECRET_VALUE_SENTINEL", error.Message);
+        Assert.DoesNotContain(parserMessage, error.Message);
+        Assert.DoesNotContain("SECRET_PROPERTY_NAME_SENTINEL", error.ToString());
+        Assert.DoesNotContain("SECRET_VALUE_SENTINEL", error.ToString());
+        Assert.DoesNotContain(parserMessage, error.ToString());
     }
 
     private static WebApplicationBuilder CreateBuilder(string contentRoot, string[]? args = null)

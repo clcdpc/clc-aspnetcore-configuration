@@ -2,9 +2,7 @@
 
 `Clc.Configuration` is a small ASP.NET Core library for loading an application's authoritative configuration from one `application.json` file under the operating system's ProgramData directory.
 
-The package is `Clc.Configuration` and the current package version is `0.1.0-beta.1`.
-
-After the package is available from the application's configured NuGet feed, add that package version to the application project.
+The package ID is `Clc.Configuration`. See [NuGet.org for available versions](https://www.nuget.org/packages/Clc.Configuration#versions-body), then add the desired version to the application project.
 
 ## Use it during startup
 
@@ -71,11 +69,85 @@ The JSON root must be an object. Duplicate property names are rejected case-inse
 
 ## Failure behavior
 
-Startup fails immediately with an `InvalidOperationException` if the OS common application data directory is unavailable, the required file is missing or unreadable, or the file contains malformed JSON, duplicate keys, unsupported encoding, or invalid `Logging:LogLevel` values. The message identifies the configuration path and remediation while omitting values from the file and parser exceptions. The file is never rewritten.
+Startup fails immediately if the OS common application data directory is unavailable or the required file cannot be loaded. File validation failures use `ClcConfigurationException`, which derives from `InvalidOperationException` for existing handlers. Its `Reason` distinguishes missing and unreadable files, invalid encoding, malformed JSON, invalid root shape, duplicate keys, ambiguous keys, size and depth limits, and invalid framework log levels. Diagnostics include the normalized file path and safe numeric parser location when available; they omit configuration values, JSON property paths and names, document excerpts, parser messages, and inner exceptions. The file is never rewritten.
+
+## Hostless deployment validation
+
+`ClcConfigurationReader` exposes the same parser and file validation without constructing a web host:
+
+```csharp
+using Clc.Configuration;
+using Microsoft.Extensions.Configuration;
+
+try
+{
+    // Pass the absolute path selected by the existing deployment workflow.
+    var configuration = ClcConfigurationReader.LoadFromFile("clc-ssrs-web", configurationPath);
+    var database = configuration.GetSection("Database").Get<DatabaseOptions>()
+        ?? throw new InvalidOperationException("Database settings are required.");
+
+    ValidateDatabaseForThisApplication(database);
+    return CreateDeploymentSuccessResponse();
+}
+catch (ClcConfigurationException error)
+{
+    return CreateDeploymentFailureResponse(error.Reason, error.Message);
+}
+```
+
+`Load("clc-ssrs-web")` reads the conventional CommonApplicationData path; `LoadFromFile` accepts an explicit absolute path for the existing deployment validation flow and parser tests. Both return an in-memory snapshot. The example's `DatabaseOptions`, validation method, and response methods are application-owned; the library does not validate application sections, database access, key compatibility, or configuration revisions.
+
+This operation does not construct a web host, start listeners or background services, initialize logging, generate keys, or modify files. It checks the file under the caller's identity. A successful check does not prove that the IIS identity can read or decrypt every value, or that external services are available. Normal startup still reads and validates the conventional file under the actual runtime identity.
+
+CLC.Deployment remains responsible for orchestrating deployment validation; this reader is only the shared file-loading and validation API.
+
+## Consumer testing helpers
+
+`Clc.Configuration.Testing` provides opt-in in-memory replacement and disposable JSON fixtures. Both use isolated state and preserve the normal listener-setting precedence. Ordinary parser and application tests can stay in the system temporary directory without writing to ProgramData:
+
+```csharp
+using Clc.Configuration;
+using Clc.Configuration.Testing;
+
+using var fixture = ClcConfigurationTesting.CreateJsonFile("""
+    { "MyOptions": { "Enabled": true } }
+    """);
+var configuration = ClcConfigurationReader.LoadFromFile("clc-ssrs-web", fixture.FilePath);
+```
+
+For a consumer app with shared startup composition, override the factory's host builder. Use the app's real executable entry point as `TEntryPoint`; the factory supplies its own host builder and does not invoke production `Program`:
+
+```csharp
+using Clc.Configuration;
+using Clc.Configuration.Testing;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
+
+public sealed class PortalFactory : WebApplicationFactory<Program>
+{
+    protected override IHostBuilder CreateHostBuilder() =>
+        Host.CreateDefaultBuilder()
+            .ConfigureWebHostDefaults(web => web.UseStartup<PortalStartup>());
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.ConfigureAppConfiguration((_, configuration) =>
+            configuration.AddClcConfigurationForTesting(new Dictionary<string, string?>
+            {
+                ["MyOptions:Enabled"] = "true",
+                ["MyOptions:Endpoint"] = "https://example.test"
+            }));
+    }
+}
+```
+
+`Program` is the actual entry point in the consumer executable, and `PortalStartup` is the same application composition used by production. Keep `AddClcConfiguration` in production `Program` before building the app; the test factory uses `PortalStartup` directly, so it does not call production `Program` or read the conventional operational file. If the app uses top-level statements, expose its generated entry point with `public partial class Program { }`. Add `Microsoft.AspNetCore.Mvc.Testing` to the consumer test project. `AddClcConfiguration` remains source-compatible and has no path override.
 
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and starts a host through the public `AddClcConfiguration` entry point. The package smoke test confirms that the package and consumer reference the project version, checks the packed metadata and license/readme files, provisions a uniquely named fixture under the actual CommonApplicationData directory, and restores through an isolated NuGet package cache. The test identity needs permission to create and remove that fixture.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, malformed escaped property names, redacted errors, disposable fixture cleanup, and package-backed public API usage. A real `WebApplicationFactory.CreateClient` integration test confirms that isolated test settings replace earlier providers while listener settings remain available; it does not create a conventional configuration file. The packed-package smoke test verifies package metadata, checks the public startup extension against a unique missing path without creating it, loads a temporary JSON fixture through the hostless reader, and starts a consumer host with isolated test settings. All test fixtures stay in temporary directories; tests do not write to machine ProgramData.
 
 ```text
 dotnet restore Clc.Configuration.slnx
@@ -87,7 +159,7 @@ dotnet test Clc.Configuration.slnx --configuration Release --no-build
 
 This library is licensed under MIT. The repository's `LICENSE` file identifies Central Library Consortium as the copyright holder, and the package includes that file, the README, MIT license metadata, and the `clcdpc/clc-configuration` Git repository link.
 
-The NuGet ID `Clc.Configuration` returned no search results from the NuGet.org search API on 2026-11-11. This only checks indexed packages; it does not confirm that the ID or its prefix is unreserved. Before the first release, verify availability and the `Clc.` prefix policy in the CLC NuGet organization account.
+Before the first release, verify availability of the `Clc.Configuration` ID and the `Clc.` prefix policy in the CLC NuGet organization account.
 
 ## NuGet trusted publishing setup
 
@@ -97,23 +169,21 @@ Before publishing the first package:
 
 1. In the `clcdpc` NuGet organization account, confirm the `Clc.Configuration` ID and `Clc.` prefix are available and that the package will be owned by `clcdpc`. The existing `Clc.Rest.Client` package is owned by `clcdpc`; verify the new package's owner list after its first upload as well.
 2. Add a NuGet.org trusted-publishing policy owned by the `clcdpc` organization for GitHub Actions. Set repository owner `clcdpc`, repository `clc-configuration`, workflow file `build-test-publish.yaml`, environment `nuget-production`, and scope the policy to `Clc.Configuration` where package scopes are available. Use the existing CLC login identity `mfields` in the workflow. No long-lived NuGet API key or GitHub secret is required.
-3. In GitHub repository settings, create the `nuget-production` environment. Restrict deployments to the workflow's version tags (`v*.*.*` and `v*.*.*-*`) and add any required reviewer protection for the CLC release process. The workflow grants `id-token: write` only to this publish job.
+3. In GitHub repository settings, create the `nuget-production` environment. Restrict deployments to tags beginning with `v` and add any required reviewer protection for the CLC release process. The workflow grants `id-token: write` only to this publish job.
 
 The NuGet policy and GitHub environment above are setup requirements for this repository; they have not been created or verified here. For current policy steps, see [NuGet.org Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing).
 
-## Creating a beta release
+## Releasing from a version tag
 
-After this change is merged and the setup above is complete, publish the initial `0.1.0-beta.1` package by tagging the merged commit with the exact project version:
+The Git tag is the source of both the assembly version and NuGet package version. Use `v<major>.<minor>.<patch>` for a stable release and optionally add a SemVer prerelease suffix such as `-beta.2`. For example, `v1.2.3-beta.2` produces package version `1.2.3-beta.2`. The workflow validates each `v` tag before restore and build; malformed tags fail with an error.
 
 ```text
-git switch master
-git pull --ff-only
-git tag v0.1.0-beta.1
-git push origin v0.1.0-beta.1
+git tag <release-tag>
+git push origin <release-tag>
 ```
 
-No GitHub Release object is needed. The tag starts the Windows and Linux build/test checks, package validation, and artifact upload. The release tag must equal `v` plus the `<Version>` in the library project. The packed consumer restores the same version referenced in the sample project, using an isolated package cache. After checks pass, a separate publish job downloads the package and SHA-256 sidecar, verifies the checksum, enters `nuget-production`, and obtains a short-lived key through NuGet trusted publishing. Pull requests and ordinary branch pushes cannot publish. For later versions, update the library project, sample consumer package reference, and this README together before tagging the matching version.
+No GitHub Release object is needed. The tag starts Windows and Linux build/test checks, package validation, and artifact upload. Untagged pull request and `master` builds use `0.0.0-ci.<run number>.<attempt>`; local builds use `0.0.0-local` unless a version is supplied. The packed consumer smoke test uses the same resolved version in its package reference and its isolated package cache. After checks pass, a separate publish job downloads the package and SHA-256 sidecar, verifies the checksum and tag, enters `nuget-production`, and obtains a short-lived key through NuGet trusted publishing. Pull requests and ordinary branch pushes cannot publish.
 
 ## Adoption notes
 
-Each application should add the package, declare its own directory name in `Program.cs`, call the extension before dependent service registration, provision its external `application.json`, and retain application-specific binding and validation in that application. This first package version does not migrate any existing application.
+Each application should add the package, declare its own directory name in `Program.cs`, call the extension before dependent service registration, provision its external `application.json`, and retain application-specific binding and validation in that application. The package does not migrate any existing application.

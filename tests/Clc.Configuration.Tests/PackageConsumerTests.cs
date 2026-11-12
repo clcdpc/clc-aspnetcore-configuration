@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
@@ -9,70 +10,152 @@ namespace Clc.Configuration.Tests;
 public sealed class PackageConsumerTests
 {
     private const string FixtureConsumerProgram = """
+        #nullable enable
         using System;
+        using System.Collections.Generic;
+        using System.IO;
         using System.Threading.Tasks;
         using Clc.Configuration;
+        using Clc.Configuration.Testing;
         using Microsoft.AspNetCore.Builder;
         using Microsoft.AspNetCore.Hosting;
+        using Microsoft.Extensions.Configuration;
 
         public static class Program
         {
             public static async Task<int> Main(string[] args)
             {
-                if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
+                if (args.Length != 0)
                 {
-                    throw new ArgumentException("Expected the isolated application directory name.");
+                    throw new ArgumentException("This isolated package consumer does not accept arguments.");
+                }
+
+                var commonApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                if (string.IsNullOrWhiteSpace(commonApplicationData) || !Path.IsPathFullyQualified(commonApplicationData))
+                {
+                    throw new InvalidOperationException("The operating-system CommonApplicationData directory is unavailable.");
+                }
+
+                var applicationDirectoryName = $"clc-package-consumer-{Guid.NewGuid():N}";
+                var applicationDirectory = Path.Combine(commonApplicationData, applicationDirectoryName);
+                var configurationPath = Path.Combine(applicationDirectory, "Config", "application.json");
+                if (Directory.Exists(applicationDirectory) || File.Exists(applicationDirectory) || File.Exists(configurationPath))
+                {
+                    throw new IOException("The unique package consumer path already exists; refusing to overwrite it.");
+                }
+
+                // Probe the fixed production path only with a unique absent name; this call is read-only.
+                var productionBuilder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
+                try
+                {
+                    productionBuilder.AddClcConfiguration(applicationDirectoryName);
+                    throw new InvalidOperationException("The public startup extension unexpectedly loaded a missing file.");
+                }
+                catch (ClcConfigurationException exception)
+                {
+                    if (exception.Reason != ClcConfigurationErrorReason.MissingFile || exception.FilePath != configurationPath)
+                    {
+                        throw;
+                    }
+                }
+
+                if (Directory.Exists(applicationDirectory) || File.Exists(configurationPath))
+                {
+                    throw new InvalidOperationException("The public startup extension created a configuration fixture.");
+                }
+
+                using (var jsonFixture = ClcConfigurationTesting.CreateJsonFile(
+                    "{\"DeploymentProbe\":\"loaded-without-host\"}"))
+                {
+                    var deploymentConfiguration = ClcConfigurationReader.LoadFromFile(
+                        "clc-package-test",
+                        jsonFixture.FilePath);
+                    if (deploymentConfiguration["DeploymentProbe"] != "loaded-without-host")
+                    {
+                        throw new InvalidOperationException("The packaged hostless reader did not load its fixture.");
+                    }
+                }
+
+                var testConfiguration = new ConfigurationBuilder()
+                    .AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["urls"] = "http://127.0.0.1:0",
+                        ["Removed:Provider"] = "should-be-removed"
+                    })
+                    .AddClcConfigurationForTesting(new Dictionary<string, string?>
+                    {
+                        ["Testing:Fixture"] = "loaded-from-testing-helper"
+                    })
+                    .Build();
+                if (testConfiguration["Testing:Fixture"] != "loaded-from-testing-helper" ||
+                    testConfiguration["urls"] != "http://127.0.0.1:0" ||
+                    testConfiguration["Removed:Provider"] is not null)
+                {
+                    throw new InvalidOperationException("The packaged testing helper did not replace and preserve its providers.");
                 }
 
                 var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
                 builder.WebHost.UseUrls("http://127.0.0.1:0");
-                builder.AddClcConfiguration(args[0]);
+                builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["Consumer:Fixture"] = "ambient-value",
+                    ["Ambient:Only"] = "should-be-removed",
+                    ["urls"] = "http://127.0.0.1:0"
+                });
+                builder.Configuration.AddClcConfigurationForTesting(new Dictionary<string, string?>
+                {
+                    ["Consumer:Fixture"] = "loaded-from-package"
+                });
 
                 await using var app = builder.Build();
-                if (app.Configuration["Consumer:Fixture"] != "loaded-from-package")
+                if (app.Configuration["Consumer:Fixture"] != "loaded-from-package" ||
+                    app.Configuration["Ambient:Only"] is not null ||
+                    app.Configuration["urls"] != "http://127.0.0.1:0")
                 {
-                    throw new InvalidOperationException("The isolated package fixture was not loaded.");
+                    throw new InvalidOperationException("The packed testing helper did not replace providers and retain listener settings.");
                 }
 
                 await app.StartAsync();
                 await app.StopAsync();
-                Console.WriteLine("Loaded the isolated fixture and started the host.");
+                Console.WriteLine("Loaded packed test settings and started an isolated host.");
                 return 0;
             }
         }
         """;
 
     [Fact]
-    public async Task PackedNuGetPackageLoadsAnIsolatedFixtureAndStartsAnIndependentConsumer()
+    public async Task PackedNuGetPackageLoadsHostlessFixturesAndStartsAnIsolatedConsumer()
     {
         using var temporaryDirectory = new TemporaryDirectory();
-        using var fixture = new CommonApplicationDataFixture();
-        fixture.WriteConfiguration("""
-            { "Consumer": { "Fixture": "loaded-from-package" } }
-            """);
 
         var packageFeed = Directory.CreateDirectory(Path.Combine(temporaryDirectory.Path, "feed")).FullName;
         var packageCache = Path.Combine(temporaryDirectory.Path, "nuget-cache");
         var consumerDirectory = Directory.CreateDirectory(Path.Combine(temporaryDirectory.Path, "consumer")).FullName;
-        CopyConsumerProject(consumerDirectory);
-        File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"), FixtureConsumerProgram);
 
         var configuration = GetBuildConfiguration();
         var repositoryRoot = FindRepositoryRoot();
         var libraryProject = Path.Combine(repositoryRoot, "src", "Clc.Configuration", "Clc.Configuration.csproj");
-        var expectedPackageVersion = GetProjectProperty(libraryProject, "Version");
+        var expectedPackageVersion = ResolvePackageVersion();
+        CopyConsumerProject(consumerDirectory, expectedPackageVersion);
+        File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"), FixtureConsumerProgram);
         Assert.Equal(expectedPackageVersion, GetConsumerPackageVersion(consumerDirectory));
         var consumerProject = Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj");
 
         await RunDotnetAsync(
             repositoryRoot,
-            ["pack", libraryProject, "--configuration", configuration, "--no-build", "--no-restore", "--output", packageFeed],
+            [
+                "pack", libraryProject, "--configuration", configuration, "--no-build", "--no-restore", "--output", packageFeed,
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         Assert.False(Directory.Exists(packageCache));
         await RunDotnetAsync(
             consumerDirectory,
-            ["restore", consumerProject, "--source", packageFeed, "--packages", packageCache],
+            [
+                "restore", consumerProject, "--source", packageFeed, "--packages", packageCache,
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         var packagePath = Assert.Single(Directory.GetFiles(packageFeed, "*.nupkg"));
@@ -109,16 +192,22 @@ public sealed class PackageConsumerTests
 
         await RunDotnetAsync(
             consumerDirectory,
-            ["build", consumerProject, "--configuration", configuration, "--no-restore"],
+            [
+                "build", consumerProject, "--configuration", configuration, "--no-restore",
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         var runResult = await RunDotnetAsync(
             consumerDirectory,
-            ["run", "--project", consumerProject, "--configuration", configuration, "--no-build", "--no-restore", "--", fixture.ApplicationDirectoryName],
+            [
+                "run", "--project", consumerProject, "--configuration", configuration, "--no-build", "--no-restore",
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         var output = runResult.StandardOutput + runResult.StandardError;
-        Assert.Contains("Loaded the isolated fixture and started the host.", output);
+        Assert.Contains("Loaded packed test settings and started an isolated host.", output);
         Assert.DoesNotContain("SECRET", output);
     }
 
@@ -170,13 +259,45 @@ public sealed class PackageConsumerTests
         return Convert.ToHexString(SHA256.HashData(buffer.ToArray()));
     }
 
-    private static string GetProjectProperty(string projectPath, string propertyName)
+    private static string ResolvePackageVersion()
     {
-        var project = XDocument.Load(projectPath);
-        var property = project
-            .Descendants()
-            .Single(element => element.Name.LocalName == propertyName);
-        return property.Value;
+        var evaluatedVersion = GetTestAssemblyProperty("Clc.Configuration.Tests.Version");
+        var evaluatedPackageVersion = GetTestAssemblyProperty("Clc.Configuration.Tests.PackageVersion");
+        if (!StringComparer.Ordinal.Equals(evaluatedVersion, evaluatedPackageVersion))
+        {
+            throw new InvalidOperationException(
+                $"The packed-consumer smoke test requires the evaluated MSBuild properties Version and PackageVersion to match; got Version '{evaluatedVersion}' and PackageVersion '{evaluatedPackageVersion}'.");
+        }
+
+        var expectedVersion = Environment.GetEnvironmentVariable("CLC_CONFIGURATION_PACKAGE_SMOKE_EXPECTED_VERSION");
+        if (!string.IsNullOrWhiteSpace(expectedVersion)
+            && !StringComparer.Ordinal.Equals(expectedVersion, evaluatedPackageVersion))
+        {
+            throw new InvalidOperationException(
+                $"The test build's evaluated PackageVersion '{evaluatedPackageVersion}' does not match the regression's expected version '{expectedVersion}'.");
+        }
+
+        var suppliedVersion = Environment.GetEnvironmentVariable("PACKAGE_VERSION");
+        if (!string.IsNullOrWhiteSpace(suppliedVersion))
+        {
+            if (!StringComparer.Ordinal.Equals(suppliedVersion, evaluatedPackageVersion))
+            {
+                throw new InvalidOperationException(
+                    $"PACKAGE_VERSION '{suppliedVersion}' does not match the test build's evaluated PackageVersion '{evaluatedPackageVersion}'.");
+            }
+        }
+
+        return evaluatedPackageVersion;
+    }
+
+    private static string GetTestAssemblyProperty(string key)
+    {
+        var attribute = typeof(PackageConsumerTests)
+            .Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .SingleOrDefault(candidate => StringComparer.Ordinal.Equals(candidate.Key, key));
+        return attribute?.Value
+            ?? throw new InvalidOperationException($"The test build did not include the evaluated MSBuild property '{key}'.");
     }
 
     private static string GetConsumerPackageVersion(string consumerDirectory)
@@ -217,12 +338,22 @@ public sealed class PackageConsumerTests
         }
     }
 
-    private static void CopyConsumerProject(string consumerDirectory)
+    private static void CopyConsumerProject(string consumerDirectory, string packageVersion)
     {
         var templateDirectory = Path.Combine(FindRepositoryRoot(), "samples", "Clc.Configuration.Consumer");
+        var copiedProjectPath = Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj");
         File.Copy(
             Path.Combine(templateDirectory, "Clc.Configuration.Consumer.csproj"),
-            Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj"));
+            copiedProjectPath);
+
+        var project = XDocument.Load(copiedProjectPath);
+        var packageReference = project
+            .Descendants()
+            .Single(element =>
+                element.Name.LocalName == "PackageReference"
+                && (string?)element.Attribute("Include") == "Clc.Configuration");
+        packageReference.SetAttributeValue("Version", packageVersion);
+        project.Save(copiedProjectPath);
     }
 
     private static string FindRepositoryRoot()
@@ -246,75 +377,6 @@ public sealed class PackageConsumerTests
     }
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
-
-    private sealed class CommonApplicationDataFixture : IDisposable
-    {
-        private readonly string _applicationDirectory;
-        private readonly string _configurationDirectory;
-        private readonly string _configurationPath;
-        private bool _ownsApplicationDirectory;
-        private bool _ownsConfigurationDirectory;
-        private bool _ownsConfigurationFile;
-
-        internal CommonApplicationDataFixture()
-        {
-            var commonApplicationData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-            if (string.IsNullOrWhiteSpace(commonApplicationData) || !Path.IsPathFullyQualified(commonApplicationData))
-            {
-                throw new InvalidOperationException("The operating-system CommonApplicationData directory is unavailable; package smoke-test coverage requires it.");
-            }
-
-            ApplicationDirectoryName = $"clc-configuration-package-{Guid.NewGuid():N}";
-            _applicationDirectory = Path.Combine(commonApplicationData, ApplicationDirectoryName);
-            _configurationDirectory = Path.Combine(_applicationDirectory, "Config");
-            _configurationPath = Path.Combine(_configurationDirectory, "application.json");
-            if (Directory.Exists(_applicationDirectory) || File.Exists(_applicationDirectory))
-            {
-                throw new IOException($"The unique package smoke-test fixture path already exists; refusing to overwrite it: '{_applicationDirectory}'.");
-            }
-        }
-
-        internal string ApplicationDirectoryName { get; }
-
-        internal void WriteConfiguration(string json)
-        {
-            Directory.CreateDirectory(_applicationDirectory);
-            _ownsApplicationDirectory = true;
-            Directory.CreateDirectory(_configurationDirectory);
-            _ownsConfigurationDirectory = true;
-
-            using var file = new FileStream(_configurationPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            _ownsConfigurationFile = true;
-            var bytes = Encoding.UTF8.GetBytes(json);
-            file.Write(bytes);
-        }
-
-        public void Dispose()
-        {
-            if (_ownsConfigurationFile && File.Exists(_configurationPath))
-            {
-                File.Delete(_configurationPath);
-            }
-
-            if (_ownsConfigurationDirectory && Directory.Exists(_configurationDirectory))
-            {
-                DeleteIfEmpty(_configurationDirectory);
-            }
-
-            if (_ownsApplicationDirectory && Directory.Exists(_applicationDirectory))
-            {
-                DeleteIfEmpty(_applicationDirectory);
-            }
-        }
-
-        private static void DeleteIfEmpty(string path)
-        {
-            if (!Directory.EnumerateFileSystemEntries(path).Any())
-            {
-                Directory.Delete(path);
-            }
-        }
-    }
 
     private sealed class TemporaryDirectory : IDisposable
     {

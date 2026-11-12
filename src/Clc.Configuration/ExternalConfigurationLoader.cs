@@ -9,7 +9,9 @@ namespace Clc.Configuration;
 
 internal static class ExternalConfigurationLoader
 {
-    private const int MaximumConfigurationBytes = 4 * 1024 * 1024;
+    internal const int MaximumConfigurationBytes = 4 * 1024 * 1024;
+    private const int MaximumJsonDepth = 32;
+
     private static readonly HashSet<string> WindowsReservedDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"
@@ -52,22 +54,58 @@ internal static class ExternalConfigurationLoader
     {
         ArgumentNullException.ThrowIfNull(builder);
         ValidateApplicationDirectoryName(applicationDirectoryName);
+        var configuration = ReadSnapshot(ValidateAndNormalizeFilePath(path));
+        ReplaceConfiguration(builder.Configuration, configuration);
+    }
+
+    internal static IConfiguration LoadFromFile(string applicationDirectoryName, string path)
+    {
+        ValidateApplicationDirectoryName(applicationDirectoryName);
+        var configuration = ReadSnapshot(ValidateAndNormalizeFilePath(path));
+        return new ConfigurationBuilder().AddInMemoryCollection(configuration).Build();
+    }
+
+    internal static void ReplaceConfiguration(
+        IConfigurationBuilder builder,
+        IReadOnlyDictionary<string, string?> configuration)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        var preservedHostSettings = CaptureHostSettings(builder);
+
+        // The external configuration is authoritative. Hosting listener controls retain
+        // their prior lower-precedence values unless the external configuration sets them.
+        builder.Sources.Clear();
+        builder.AddInMemoryCollection(preservedHostSettings);
+        builder.AddInMemoryCollection(configuration);
+    }
+
+    private static string ValidateAndNormalizeFilePath(string path)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         if (!Path.IsPathFullyQualified(path))
         {
             throw new ArgumentException("The external configuration file path must be absolute.", nameof(path));
         }
 
-        var fullPath = Path.GetFullPath(path);
-        var configuration = ReadSnapshot(fullPath);
-        var preservedHostSettings = CaptureHostSettings(builder.Configuration);
+        return Path.GetFullPath(path);
+    }
 
-        // Discard all host defaults, appsettings, environment variables, command-line
-        // application overrides, and other providers. Only the listener controls captured
-        // above and this one external snapshot remain.
-        builder.Configuration.Sources.Clear();
-        builder.Configuration.AddInMemoryCollection(preservedHostSettings);
-        builder.Configuration.AddInMemoryCollection(configuration);
+    private static Dictionary<string, string?> CaptureHostSettings(IConfigurationBuilder builder)
+    {
+        if (builder is IConfiguration currentConfiguration)
+        {
+            return CaptureHostSettings(currentConfiguration);
+        }
+
+        var configuration = builder.Build();
+        try
+        {
+            return CaptureHostSettings(configuration);
+        }
+        finally
+        {
+            (configuration as IDisposable)?.Dispose();
+        }
     }
 
     private static Dictionary<string, string?> CaptureHostSettings(IConfiguration configuration)
@@ -93,7 +131,7 @@ internal static class ExternalConfigurationLoader
             using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             if (file.Length > MaximumConfigurationBytes)
             {
-                throw InvalidConfiguration();
+                throw CreateError(path, ClcConfigurationErrorReason.SizeLimitExceeded);
             }
 
             using var buffer = new MemoryStream();
@@ -103,7 +141,7 @@ internal static class ExternalConfigurationLoader
             {
                 if (buffer.Length + read > MaximumConfigurationBytes)
                 {
-                    throw InvalidConfiguration();
+                    throw CreateError(path, ClcConfigurationErrorReason.SizeLimitExceeded);
                 }
 
                 buffer.Write(chunk, 0, read);
@@ -113,44 +151,63 @@ internal static class ExternalConfigurationLoader
         }
         catch (FileNotFoundException)
         {
-            throw new InvalidOperationException(
-                $"Required external application configuration file is missing: '{path}'. Provision it and grant the application identity read access.");
+            throw CreateError(path, ClcConfigurationErrorReason.MissingFile);
         }
         catch (DirectoryNotFoundException)
         {
-            throw new InvalidOperationException(
-                $"Required external application configuration file is missing: '{path}'. Provision it and grant the application identity read access.");
+            throw CreateError(path, ClcConfigurationErrorReason.MissingFile);
         }
         catch (UnauthorizedAccessException)
         {
-            throw new InvalidOperationException(
-                $"External application configuration file cannot be read: '{path}'. Check access for the application identity.");
-        }
-        catch (InvalidDataException)
-        {
-            throw new InvalidOperationException(
-                $"External application configuration file contains invalid JSON, duplicate keys, or an unsupported text encoding: '{path}'. Correct the file and restart the application.");
+            throw CreateError(path, ClcConfigurationErrorReason.UnreadableFile);
         }
         catch (IOException)
         {
-            throw new InvalidOperationException(
-                $"External application configuration file cannot be read: '{path}'. Check access for the application identity.");
+            throw CreateError(path, ClcConfigurationErrorReason.UnreadableFile);
+        }
+
+        byte[] jsonBytes;
+        try
+        {
+            jsonBytes = NormalizeJsonEncoding(input);
+        }
+        catch (DecoderFallbackException)
+        {
+            throw CreateError(path, ClcConfigurationErrorReason.InvalidEncoding);
+        }
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(jsonBytes, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip,
+                MaxDepth = MaximumJsonDepth
+            });
+        }
+        catch (JsonException exception)
+        {
+            var reason = IsDepthLimitFailure(exception)
+                ? ClcConfigurationErrorReason.DepthLimitExceeded
+                : ClcConfigurationErrorReason.MalformedJson;
+            throw CreateJsonError(path, reason, exception);
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                throw CreateError(path, ClcConfigurationErrorReason.InvalidRootShape);
+            }
+
+            ValidateObject(path, document.RootElement);
         }
 
         Dictionary<string, string?> configuration;
         try
         {
-            var bytes = NormalizeJsonEncoding(input);
-            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions
-            {
-                AllowTrailingCommas = true,
-                CommentHandling = JsonCommentHandling.Skip,
-                MaxDepth = 32
-            });
-
-            ValidateRootAndKeys(document.RootElement);
-
-            using var snapshot = new MemoryStream(bytes, writable: false);
+            using var snapshot = new MemoryStream(jsonBytes, writable: false);
             using var loaded = (ConfigurationRoot)new ConfigurationBuilder()
                 .AddJsonStream(snapshot)
                 .Build();
@@ -160,18 +217,20 @@ internal static class ExternalConfigurationLoader
                 pair => pair.Value,
                 StringComparer.OrdinalIgnoreCase);
         }
-        catch (Exception exception) when (
-            exception is InvalidDataException or JsonException or FormatException or ArgumentException or InvalidOperationException)
+        catch (JsonException exception)
         {
-            // JSON and binder diagnostics can include supplied values. Keep only the file path.
-            throw new InvalidOperationException(
-                $"External application configuration file contains invalid JSON, duplicate keys, or an unsupported text encoding: '{path}'. Correct the file and restart the application.");
+            throw CreateJsonError(path, ClcConfigurationErrorReason.MalformedJson, exception);
+        }
+        catch (Exception exception) when (exception is FormatException or ArgumentException or InvalidOperationException)
+        {
+            // Framework configuration binding errors can include supplied values or key paths.
+            // Do not retain parser exceptions or copy their text into a public diagnostic.
+            throw CreateError(path, ClcConfigurationErrorReason.MalformedJson);
         }
 
         if (!HasValidLoggingLevels(configuration))
         {
-            throw new InvalidOperationException(
-                $"External application configuration file contains invalid Logging:LogLevel settings: '{path}'. Use named log levels from Trace through None and restart the application.");
+            throw CreateError(path, ClcConfigurationErrorReason.InvalidFrameworkLogLevel);
         }
 
         return configuration;
@@ -208,41 +267,56 @@ internal static class ExternalConfigurationLoader
         return new UTF8Encoding(false, true).GetBytes(text);
     }
 
-    private static void ValidateRootAndKeys(JsonElement root)
-    {
-        if (root.ValueKind != JsonValueKind.Object)
-        {
-            throw InvalidConfiguration();
-        }
-
-        ValidateObject(root);
-    }
-
-    private static void ValidateObject(JsonElement element)
+    private static void ValidateObject(string path, JsonElement element)
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var property in element.EnumerateObject())
         {
-            if (property.Name.Length == 0 || property.Name.Contains(':') || !names.Add(property.Name))
+            var name = GetPropertyName(path, property);
+            if (name.Length == 0 || name.Contains(':'))
             {
-                throw InvalidConfiguration();
+                throw CreateError(path, ClcConfigurationErrorReason.AmbiguousKey);
             }
 
-            ValidateValue(property.Value);
+            if (!names.Add(name))
+            {
+                throw CreateError(path, ClcConfigurationErrorReason.DuplicateKey);
+            }
+
+            ValidateValue(path, property.Value);
         }
     }
 
-    private static void ValidateValue(JsonElement element)
+    private static string GetPropertyName(string path, JsonProperty property)
+    {
+        try
+        {
+            return property.Name;
+        }
+        catch (ClcConfigurationException)
+        {
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            // JsonDocument accepts escaped unpaired surrogates while parsing, then throws
+            // when the property name is decoded. Keep this boundary around only that decode
+            // so unrelated validation or programming failures are not reclassified.
+            throw CreateError(path, ClcConfigurationErrorReason.MalformedJson);
+        }
+    }
+
+    private static void ValidateValue(string path, JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.Object)
         {
-            ValidateObject(element);
+            ValidateObject(path, element);
         }
         else if (element.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in element.EnumerateArray())
             {
-                ValidateValue(item);
+                ValidateValue(path, item);
             }
         }
     }
@@ -270,8 +344,6 @@ internal static class ExternalConfigurationLoader
     private static bool IsFrameworkLoggingLevel(string key)
     {
         var segments = key.Split(':');
-        // LoggerFilterConfigureOptions enumerates each LogLevel section recursively, so
-        // descendants beyond the usual category key (including array indexes) are levels too.
         var isGlobalLevel = segments.Length >= 3 &&
                 segments[0].Equals("Logging", StringComparison.OrdinalIgnoreCase) &&
                 segments[1].Equals("LogLevel", StringComparison.OrdinalIgnoreCase);
@@ -282,7 +354,7 @@ internal static class ExternalConfigurationLoader
         return isGlobalLevel || isProviderLevel;
     }
 
-    private static void ValidateApplicationDirectoryName(string applicationDirectoryName)
+    internal static void ValidateApplicationDirectoryName(string applicationDirectoryName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(applicationDirectoryName);
 
@@ -312,5 +384,29 @@ internal static class ExternalConfigurationLoader
         }
     }
 
-    private static InvalidDataException InvalidConfiguration() => new();
+    private static bool IsDepthLimitFailure(JsonException exception)
+    {
+        // The JSON reader exposes numeric location information, but its depth reason is
+        // described only in the parser text. Inspect that text internally and never return it.
+        return exception.Message.Contains("depth", StringComparison.OrdinalIgnoreCase) &&
+            (exception.Message.Contains("maximum", StringComparison.OrdinalIgnoreCase) ||
+                exception.Message.Contains("exceed", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static ClcConfigurationException CreateJsonError(
+        string path,
+        ClcConfigurationErrorReason reason,
+        JsonException exception)
+    {
+        long? line = exception.LineNumber is long lineNumber ? lineNumber + 1 : null;
+        long? column = exception.BytePositionInLine is long bytePosition ? bytePosition + 1 : null;
+        return CreateError(path, reason, line, column);
+    }
+
+    private static ClcConfigurationException CreateError(
+        string path,
+        ClcConfigurationErrorReason reason,
+        long? lineNumber = null,
+        long? columnNumber = null) =>
+        new(reason, path, lineNumber, columnNumber);
 }
