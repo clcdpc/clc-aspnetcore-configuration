@@ -8,8 +8,7 @@ on:
     branches:
       - master
     tags:
-      - "v*.*.*"
-      - "v*.*.*-*"
+      - "v*"
 
 permissions:
   contents: read
@@ -54,31 +53,32 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Validate package version for this ref
+      - name: Resolve package version for this ref
+        id: version
         run: |
-          package_version="$(dotnet msbuild "$PACKAGE_PROJECT" -getProperty:Version | tr -d '\r\n')"
-          if [[ -z "$package_version" ]]; then
-            echo "The package project does not define a version."
-            exit 1
-          fi
+          source scripts/resolve_package_version.sh
+          package_version="$(resolve_package_version "$GITHUB_REF" "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT")"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "Resolved package version: $package_version"
 
-          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v${package_version}" ]]; then
-            echo "Release tag '$GITHUB_REF_NAME' must match the project version as 'v${package_version}'."
-            exit 1
-          fi
-
-          echo "Validating package version ${package_version}."
+      - name: Check package version resolution
+        run: bash scripts/test_package_version.sh
 
       - name: Restore with an isolated NuGet cache
         env:
           NUGET_PACKAGES: ${{ runner.temp }}/nuget-packages
-        run: dotnet restore Clc.Configuration.slnx
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: dotnet restore Clc.Configuration.slnx -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION"
 
       - name: Build
-        run: dotnet build Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-restore
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: dotnet build Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-restore -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION"
 
       - name: Test
-        run: dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION"
 
   package:
     name: pack and retain NuGet artifact
@@ -97,29 +97,27 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Validate package version for this ref
+      - name: Resolve package version for this ref
         id: version
         run: |
-          package_version="$(dotnet msbuild "$PACKAGE_PROJECT" -getProperty:Version | tr -d '\r\n')"
-          if [[ -z "$package_version" ]]; then
-            echo "The package project does not define a version."
-            exit 1
-          fi
-
-          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" != "v${package_version}" ]]; then
-            echo "Release tag '$GITHUB_REF_NAME' must match the project version as 'v${package_version}'."
-            exit 1
-          fi
-
+          source scripts/resolve_package_version.sh
+          package_version="$(resolve_package_version "$GITHUB_REF" "$GITHUB_RUN_NUMBER" "$GITHUB_RUN_ATTEMPT")"
           echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "Resolved package version: $package_version"
+
+      - name: Check package version resolution
+        run: bash scripts/test_package_version.sh
 
       - name: Restore with an isolated NuGet cache
         env:
           NUGET_PACKAGES: ${{ runner.temp }}/nuget-packages
-        run: dotnet restore "$PACKAGE_PROJECT"
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: dotnet restore "$PACKAGE_PROJECT" -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION"
 
       - name: Pack
-        run: dotnet pack "$PACKAGE_PROJECT" --configuration "$BUILD_CONFIGURATION" --no-restore --output "$PACKAGE_OUTPUT_DIR"
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: dotnet pack "$PACKAGE_PROJECT" --configuration "$BUILD_CONFIGURATION" --no-restore --output "$PACKAGE_OUTPUT_DIR" -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION"
 
       - name: Validate package metadata and write checksum
         run: python3 scripts/validate_nuget_package.py --package "$PACKAGE_OUTPUT_DIR/Clc.Configuration.${{ steps.version.outputs.package_version }}.nupkg" --version "${{ steps.version.outputs.package_version }}"
@@ -142,6 +140,7 @@ jobs:
       contents: read
       id-token: write
     env:
+      VERSION: ${{ needs.package.outputs.package_version }}
       PACKAGE_VERSION: ${{ needs.package.outputs.package_version }}
       PACKAGE_FILE: Clc.Configuration.${{ needs.package.outputs.package_version }}.nupkg
 
@@ -154,8 +153,8 @@ jobs:
 
       - name: Verify package checksum and release tag
         run: |
-          if [[ "$GITHUB_REF_NAME" != "v${PACKAGE_VERSION}" ]]; then
-            echo "Release tag '$GITHUB_REF_NAME' does not match package version '${PACKAGE_VERSION}'."
+          if [[ "$VERSION" != "$PACKAGE_VERSION" || "$GITHUB_REF_NAME" != "v${PACKAGE_VERSION}" ]]; then
+            echo "Release tag '$GITHUB_REF_NAME' does not match package Version '$VERSION' and PackageVersion '$PACKAGE_VERSION'."
             exit 1
           fi
 

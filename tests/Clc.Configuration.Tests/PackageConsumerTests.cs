@@ -130,25 +130,31 @@ public sealed class PackageConsumerTests
         var packageFeed = Directory.CreateDirectory(Path.Combine(temporaryDirectory.Path, "feed")).FullName;
         var packageCache = Path.Combine(temporaryDirectory.Path, "nuget-cache");
         var consumerDirectory = Directory.CreateDirectory(Path.Combine(temporaryDirectory.Path, "consumer")).FullName;
-        CopyConsumerProject(consumerDirectory);
-        File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"), FixtureConsumerProgram);
 
         var configuration = GetBuildConfiguration();
         var repositoryRoot = FindRepositoryRoot();
         var libraryProject = Path.Combine(repositoryRoot, "src", "Clc.Configuration", "Clc.Configuration.csproj");
-        var expectedPackageVersion = GetProjectProperty(libraryProject, "Version");
+        var expectedPackageVersion = await ResolvePackageVersionAsync(libraryProject, repositoryRoot, packageCache);
+        CopyConsumerProject(consumerDirectory, expectedPackageVersion);
+        File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"), FixtureConsumerProgram);
         Assert.Equal(expectedPackageVersion, GetConsumerPackageVersion(consumerDirectory));
         var consumerProject = Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj");
 
         await RunDotnetAsync(
             repositoryRoot,
-            ["pack", libraryProject, "--configuration", configuration, "--no-build", "--no-restore", "--output", packageFeed],
+            [
+                "pack", libraryProject, "--configuration", configuration, "--no-build", "--no-restore", "--output", packageFeed,
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         Assert.False(Directory.Exists(packageCache));
         await RunDotnetAsync(
             consumerDirectory,
-            ["restore", consumerProject, "--source", packageFeed, "--packages", packageCache],
+            [
+                "restore", consumerProject, "--source", packageFeed, "--packages", packageCache,
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         var packagePath = Assert.Single(Directory.GetFiles(packageFeed, "*.nupkg"));
@@ -185,12 +191,18 @@ public sealed class PackageConsumerTests
 
         await RunDotnetAsync(
             consumerDirectory,
-            ["build", consumerProject, "--configuration", configuration, "--no-restore"],
+            [
+                "build", consumerProject, "--configuration", configuration, "--no-restore",
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         var runResult = await RunDotnetAsync(
             consumerDirectory,
-            ["run", "--project", consumerProject, "--configuration", configuration, "--no-build", "--no-restore"],
+            [
+                "run", "--project", consumerProject, "--configuration", configuration, "--no-build", "--no-restore",
+                $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
+            ],
             packageCache);
 
         var output = runResult.StandardOutput + runResult.StandardError;
@@ -246,13 +258,24 @@ public sealed class PackageConsumerTests
         return Convert.ToHexString(SHA256.HashData(buffer.ToArray()));
     }
 
-    private static string GetProjectProperty(string projectPath, string propertyName)
+    private static async Task<string> ResolvePackageVersionAsync(
+        string libraryProject,
+        string repositoryRoot,
+        string packageCache)
     {
-        var project = XDocument.Load(projectPath);
-        var property = project
-            .Descendants()
-            .Single(element => element.Name.LocalName == propertyName);
-        return property.Value;
+        var suppliedVersion = Environment.GetEnvironmentVariable("PACKAGE_VERSION");
+        if (!string.IsNullOrWhiteSpace(suppliedVersion))
+        {
+            return suppliedVersion;
+        }
+
+        var result = await RunDotnetAsync(
+            repositoryRoot,
+            ["msbuild", libraryProject, "-getProperty:PackageVersion"],
+            packageCache);
+        var resolvedVersion = result.StandardOutput.Trim();
+        Assert.False(string.IsNullOrWhiteSpace(resolvedVersion), "MSBuild did not resolve a package version.");
+        return resolvedVersion;
     }
 
     private static string GetConsumerPackageVersion(string consumerDirectory)
@@ -293,12 +316,22 @@ public sealed class PackageConsumerTests
         }
     }
 
-    private static void CopyConsumerProject(string consumerDirectory)
+    private static void CopyConsumerProject(string consumerDirectory, string packageVersion)
     {
         var templateDirectory = Path.Combine(FindRepositoryRoot(), "samples", "Clc.Configuration.Consumer");
+        var copiedProjectPath = Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj");
         File.Copy(
             Path.Combine(templateDirectory, "Clc.Configuration.Consumer.csproj"),
-            Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj"));
+            copiedProjectPath);
+
+        var project = XDocument.Load(copiedProjectPath);
+        var packageReference = project
+            .Descendants()
+            .Single(element =>
+                element.Name.LocalName == "PackageReference"
+                && (string?)element.Attribute("Include") == "Clc.Configuration");
+        packageReference.SetAttributeValue("Version", packageVersion);
+        project.Save(copiedProjectPath);
     }
 
     private static string FindRepositoryRoot()
