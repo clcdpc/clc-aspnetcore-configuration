@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
@@ -307,6 +308,45 @@ public sealed class ExternalConfigurationTests
     }
 
     [Theory]
+    [InlineData("\\uD800", false)]
+    [InlineData("\\uDC00", false)]
+    [InlineData("\\uD800", true)]
+    public void MalformedEscapedPropertyNamesFailNormalStartupWithSafeDiagnostics(
+        string escapedSurrogate,
+        bool nestedInArray)
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var json = CreateMalformedEscapedPropertyNameJson(escapedSurrogate, nestedInArray);
+        var filePath = temporaryDirectory.WriteConfiguration(json);
+        var parserMessage = GetPropertyNameParserMessage(json, nestedInArray);
+        var builder = CreateBuilder(temporaryDirectory.Path);
+
+        var error = Assert.Throws<ClcConfigurationException>(
+            () => ExternalConfigurationLoader.AddFromFile(builder, "clc-test-app", filePath));
+
+        AssertMalformedPropertyNameDiagnostics(error, filePath, parserMessage);
+    }
+
+    [Theory]
+    [InlineData("\\uD800", false)]
+    [InlineData("\\uDC00", false)]
+    [InlineData("\\uD800", true)]
+    public void MalformedEscapedPropertyNamesFailHostlessReadWithSafeDiagnostics(
+        string escapedSurrogate,
+        bool nestedInArray)
+    {
+        using var temporaryDirectory = new TemporaryDirectory();
+        var json = CreateMalformedEscapedPropertyNameJson(escapedSurrogate, nestedInArray);
+        var filePath = temporaryDirectory.WriteConfiguration(json);
+        var parserMessage = GetPropertyNameParserMessage(json, nestedInArray);
+
+        var error = Assert.Throws<ClcConfigurationException>(
+            () => ClcConfigurationReader.LoadFromFile("clc-test-app", filePath));
+
+        AssertMalformedPropertyNameDiagnostics(error, filePath, parserMessage);
+    }
+
+    [Theory]
     [InlineData("null")]
     [InlineData("[]")]
     [InlineData("\"not-an-object\"")]
@@ -478,6 +518,41 @@ public sealed class ExternalConfigurationTests
 
     private static string CreateNestedArrayJson(int arrayDepth) =>
         "{\"Nested\":" + new string('[', arrayDepth) + "0" + new string(']', arrayDepth) + "}";
+
+    private static string CreateMalformedEscapedPropertyNameJson(string escapedSurrogate, bool nestedInArray)
+    {
+        var property = "\"SECRET_PROPERTY_NAME_SENTINEL" + escapedSurrogate + "\":\"SECRET_VALUE_SENTINEL\"";
+        return nestedInArray ? "{\"Nested\":[{" + property + "}]}" : "{" + property + "}";
+    }
+
+    private static string GetPropertyNameParserMessage(string json, bool nestedInArray)
+    {
+        using var document = JsonDocument.Parse(json);
+        var element = nestedInArray
+            ? document.RootElement.GetProperty("Nested").EnumerateArray().Single()
+            : document.RootElement;
+        var property = Assert.Single(element.EnumerateObject());
+        var parserException = Assert.Throws<InvalidOperationException>(() => _ = property.Name);
+        Assert.False(string.IsNullOrEmpty(parserException.Message));
+        return parserException.Message;
+    }
+
+    private static void AssertMalformedPropertyNameDiagnostics(
+        ClcConfigurationException error,
+        string filePath,
+        string parserMessage)
+    {
+        Assert.Equal(ClcConfigurationErrorReason.MalformedJson, error.Reason);
+        Assert.Equal(filePath, error.FilePath);
+        Assert.Contains(filePath, error.Message);
+        Assert.Null(error.InnerException);
+        Assert.DoesNotContain("SECRET_PROPERTY_NAME_SENTINEL", error.Message);
+        Assert.DoesNotContain("SECRET_VALUE_SENTINEL", error.Message);
+        Assert.DoesNotContain(parserMessage, error.Message);
+        Assert.DoesNotContain("SECRET_PROPERTY_NAME_SENTINEL", error.ToString());
+        Assert.DoesNotContain("SECRET_VALUE_SENTINEL", error.ToString());
+        Assert.DoesNotContain(parserMessage, error.ToString());
+    }
 
     private static WebApplicationBuilder CreateBuilder(string contentRoot, string[]? args = null)
     {

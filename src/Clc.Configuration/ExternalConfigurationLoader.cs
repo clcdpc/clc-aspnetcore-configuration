@@ -272,17 +272,37 @@ internal static class ExternalConfigurationLoader
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var property in element.EnumerateObject())
         {
-            if (property.Name.Length == 0 || property.Name.Contains(':'))
+            var name = GetPropertyName(path, property);
+            if (name.Length == 0 || name.Contains(':'))
             {
                 throw CreateError(path, ClcConfigurationErrorReason.AmbiguousKey);
             }
 
-            if (!names.Add(property.Name))
+            if (!names.Add(name))
             {
                 throw CreateError(path, ClcConfigurationErrorReason.DuplicateKey);
             }
 
             ValidateValue(path, property.Value);
+        }
+    }
+
+    private static string GetPropertyName(string path, JsonProperty property)
+    {
+        try
+        {
+            return property.Name;
+        }
+        catch (ClcConfigurationException)
+        {
+            throw;
+        }
+        catch (InvalidOperationException)
+        {
+            // JsonDocument accepts escaped unpaired surrogates while parsing, then throws
+            // when the property name is decoded. Keep this boundary around only that decode
+            // so unrelated validation or programming failures are not reclassified.
+            throw CreateError(path, ClcConfigurationErrorReason.MalformedJson);
         }
     }
 

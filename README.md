@@ -117,24 +117,22 @@ using var fixture = ClcConfigurationTesting.CreateJsonFile("""
 var configuration = ClcConfigurationReader.LoadFromFile("clc-ssrs-web", fixture.FilePath);
 ```
 
-For a consumer app that exposes a test host entry point and shares its application composition, a `WebApplicationFactory` can replace configuration explicitly:
+For a consumer app with shared startup composition, override the factory's host builder. Use the app's real executable entry point as `TEntryPoint`; the factory supplies its own host builder and does not invoke production `Program`:
 
 ```csharp
+using Clc.Configuration;
 using Clc.Configuration.Testing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 
-public sealed class PortalTestEntryPoint
+public sealed class PortalFactory : WebApplicationFactory<Program>
 {
-    public static IHostBuilder CreateHostBuilder(string[] args) =>
-        Host.CreateDefaultBuilder(args)
+    protected override IHostBuilder CreateHostBuilder() =>
+        Host.CreateDefaultBuilder()
             .ConfigureWebHostDefaults(web => web.UseStartup<PortalStartup>());
-}
 
-public sealed class PortalFactory : WebApplicationFactory<PortalTestEntryPoint>
-{
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.ConfigureAppConfiguration((_, configuration) =>
@@ -142,17 +140,16 @@ public sealed class PortalFactory : WebApplicationFactory<PortalTestEntryPoint>
             {
                 ["MyOptions:Enabled"] = "true",
                 ["MyOptions:Endpoint"] = "https://example.test"
-            })
-        );
+            }));
     }
 }
 ```
 
-`PortalTestEntryPoint` and `PortalStartup` are application-owned examples; this test entry point reuses application composition while omitting the production file-loading call. Add `Microsoft.AspNetCore.Mvc.Testing` in the consumer test project. A factory that directly runs a production `Program` which calls `AddClcConfiguration` still executes that normal startup call and reads the conventional file. The helper does not intercept startup. `AddClcConfiguration` remains source-compatible and has no path override.
+`Program` is the actual entry point in the consumer executable, and `PortalStartup` is the same application composition used by production. Keep `AddClcConfiguration` in production `Program` before building the app; the test factory uses `PortalStartup` directly, so it does not call production `Program` or read the conventional operational file. If the app uses top-level statements, expose its generated entry point with `public partial class Program { }`. Add `Microsoft.AspNetCore.Mvc.Testing` to the consumer test project. `AddClcConfiguration` remains source-compatible and has no path override.
 
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, redacted errors, disposable fixture cleanup, and package-backed public API usage. The package smoke test also starts a consumer through the public `AddClcConfiguration` entry point at the conventional CommonApplicationData path. It provisions only a uniquely named fixture and restores through an isolated NuGet package cache; that one smoke test needs permission to create and remove its fixture. Ordinary tests do not write to ProgramData.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, malformed escaped property names, redacted errors, disposable fixture cleanup, and package-backed public API usage. A real `WebApplicationFactory.CreateClient` integration test confirms that isolated test settings replace earlier providers while listener settings remain available; it does not create a conventional configuration file. The separate packed-package smoke test starts a consumer through the public `AddClcConfiguration` entry point using a uniquely named fixture beneath CommonApplicationData, so that test still needs permission to create and remove its fixture. It restores through an isolated NuGet package cache.
 
 ```text
 dotnet restore Clc.Configuration.slnx
