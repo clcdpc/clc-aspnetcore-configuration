@@ -80,6 +80,11 @@ jobs:
           PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
         run: dotnet test Clc.Configuration.slnx --configuration "$BUILD_CONFIGURATION" --no-build --no-restore -p:Version="$PACKAGE_VERSION" -p:PackageVersion="$PACKAGE_VERSION"
 
+      - name: Check packed-consumer package version handoff
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: bash scripts/test_package_consumer_versions.sh
+
   package:
     name: pack and retain NuGet artifact
     runs-on: ubuntu-latest

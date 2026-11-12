@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
@@ -134,7 +135,7 @@ public sealed class PackageConsumerTests
         var configuration = GetBuildConfiguration();
         var repositoryRoot = FindRepositoryRoot();
         var libraryProject = Path.Combine(repositoryRoot, "src", "Clc.Configuration", "Clc.Configuration.csproj");
-        var expectedPackageVersion = await ResolvePackageVersionAsync(libraryProject, repositoryRoot, packageCache);
+        var expectedPackageVersion = ResolvePackageVersion();
         CopyConsumerProject(consumerDirectory, expectedPackageVersion);
         File.WriteAllText(Path.Combine(consumerDirectory, "Program.cs"), FixtureConsumerProgram);
         Assert.Equal(expectedPackageVersion, GetConsumerPackageVersion(consumerDirectory));
@@ -258,24 +259,45 @@ public sealed class PackageConsumerTests
         return Convert.ToHexString(SHA256.HashData(buffer.ToArray()));
     }
 
-    private static async Task<string> ResolvePackageVersionAsync(
-        string libraryProject,
-        string repositoryRoot,
-        string packageCache)
+    private static string ResolvePackageVersion()
     {
+        var evaluatedVersion = GetTestAssemblyProperty("Clc.Configuration.Tests.Version");
+        var evaluatedPackageVersion = GetTestAssemblyProperty("Clc.Configuration.Tests.PackageVersion");
+        if (!StringComparer.Ordinal.Equals(evaluatedVersion, evaluatedPackageVersion))
+        {
+            throw new InvalidOperationException(
+                $"The packed-consumer smoke test requires the evaluated MSBuild properties Version and PackageVersion to match; got Version '{evaluatedVersion}' and PackageVersion '{evaluatedPackageVersion}'.");
+        }
+
+        var expectedVersion = Environment.GetEnvironmentVariable("CLC_CONFIGURATION_PACKAGE_SMOKE_EXPECTED_VERSION");
+        if (!string.IsNullOrWhiteSpace(expectedVersion)
+            && !StringComparer.Ordinal.Equals(expectedVersion, evaluatedPackageVersion))
+        {
+            throw new InvalidOperationException(
+                $"The test build's evaluated PackageVersion '{evaluatedPackageVersion}' does not match the regression's expected version '{expectedVersion}'.");
+        }
+
         var suppliedVersion = Environment.GetEnvironmentVariable("PACKAGE_VERSION");
         if (!string.IsNullOrWhiteSpace(suppliedVersion))
         {
-            return suppliedVersion;
+            if (!StringComparer.Ordinal.Equals(suppliedVersion, evaluatedPackageVersion))
+            {
+                throw new InvalidOperationException(
+                    $"PACKAGE_VERSION '{suppliedVersion}' does not match the test build's evaluated PackageVersion '{evaluatedPackageVersion}'.");
+            }
         }
 
-        var result = await RunDotnetAsync(
-            repositoryRoot,
-            ["msbuild", libraryProject, "-getProperty:PackageVersion"],
-            packageCache);
-        var resolvedVersion = result.StandardOutput.Trim();
-        Assert.False(string.IsNullOrWhiteSpace(resolvedVersion), "MSBuild did not resolve a package version.");
-        return resolvedVersion;
+        return evaluatedPackageVersion;
+    }
+
+    private static string GetTestAssemblyProperty(string key)
+    {
+        var attribute = typeof(PackageConsumerTests)
+            .Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .SingleOrDefault(candidate => StringComparer.Ordinal.Equals(candidate.Key, key));
+        return attribute?.Value
+            ?? throw new InvalidOperationException($"The test build did not include the evaluated MSBuild property '{key}'.");
     }
 
     private static string GetConsumerPackageVersion(string consumerDirectory)
