@@ -66,9 +66,9 @@ def validate_package(package_path: Path, expected_version: str) -> str:
 
         if child_text(metadata, "readme") != "README.md":
             raise ValueError("Package readme metadata must point to README.md.")
-        for required_entry in ("readme.md", "license"):
+        for required_entry in ("readme.md", "license", "buildtransitive/clc.configuration.targets"):
             if required_entry not in entries:
-                raise ValueError(f"Package is missing its root {required_entry} file.")
+                raise ValueError(f"Package is missing required file '{required_entry}'.")
 
     digest = hashlib.sha256(package_path.read_bytes()).hexdigest()
     checksum_path = package_path.with_suffix(package_path.suffix + ".sha256")

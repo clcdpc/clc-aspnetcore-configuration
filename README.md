@@ -1,6 +1,6 @@
 # CLC Configuration
 
-`Clc.Configuration` is a small ASP.NET Core library for loading an application's authoritative configuration from one `application.json` file under the operating system's ProgramData directory.
+`Clc.Configuration` is a small .NET hosting library for loading an application's authoritative configuration from one `application.json` file under the operating system's ProgramData directory.
 
 The package ID is `Clc.Configuration`. See [NuGet.org for available versions](https://www.nuget.org/packages/Clc.Configuration#versions-body), then add the desired version to the application project.
 
@@ -37,6 +37,25 @@ public static class Program
 ```
 
 The application directory name belongs in `Program.cs` so the deployment convention is visible alongside startup. It must be one portable directory name. Absolute paths, path separators, traversal names, invalid filename characters, and Windows reserved device names (including names followed by extensions) are rejected.
+
+## Generic Host and Windows workers
+
+The same extension supports `IHostApplicationBuilder`, including `HostApplicationBuilder`:
+
+```csharp
+using Clc.Configuration;
+using Microsoft.Extensions.Hosting;
+
+var builder = Host.CreateApplicationBuilder(args);
+builder.AddClcConfiguration("clc-scheduler-worker");
+builder.Services.AddHostedService<Worker>();
+using var host = builder.Build();
+await host.RunAsync();
+```
+
+`Worker` is application-owned. Call the extension before service registration that reads configuration. The web and worker overloads use the same file parser, provider replacement, retained listener controls, and restart-only snapshot. Host environment and content root have already been established by the host builder. No web server is constructed by this overload, and no production path override is added. The early `--clc-appdata-directory` opt-in also works for workers; see the [Worker sample](samples/Clc.Configuration.Worker).
+
+For a Windows service, retain the application's usual `AddWindowsService` registration and `Microsoft.Extensions.Hosting.WindowsServices` dependency. This library does not install or manage services. It still references `Microsoft.AspNetCore.App`: framework-dependent workers require the matching ASP.NET Core 10 shared runtime as well as .NET 10, even though they do not host HTTP. The package supplies the framework-reference metadata, not a runtime installation. Migrating a worker that currently merges environment files or variables requires explicitly adopting the authoritative-file contract below.
 
 ## File convention
 
@@ -176,9 +195,33 @@ public sealed class PortalFactory : WebApplicationFactory<Program>
 
 `Program` is the actual entry point in the consumer executable, and `PortalStartup` is the same application composition used by production. Keep `AddClcConfiguration` in production `Program` before building the app; the test factory uses `PortalStartup` directly, so it does not call production `Program` or read the conventional operational file. If the app uses top-level statements, expose its generated entry point with `public partial class Program { }`. Add `Microsoft.AspNetCore.Mvc.Testing` to the consumer test project. `AddClcConfiguration` remains source-compatible and has no path override.
 
+## Publish guard
+
+The NuGet package includes a **default-enabled** MSBuild publish guard, imported transitively. `dotnet publish` fails with `CLC_CONFIG001` if an SDK-resolved publish item has the filename `application.json`, case-insensitively, at any directory depth. Both source and destination names are checked, so linking or renaming an operational file does not bypass the guard. The guard fails before files are copied rather than silently excluding them; ordinary builds are unaffected.
+
+Exclude operational files in the consuming project, for example:
+
+```xml
+<ItemGroup>
+  <Content Update="application.json" CopyToPublishDirectory="Never" />
+</ItemGroup>
+```
+
+Use the item's actual path and item type (`None` instead of `Content` when appropriate). Intentionally publishable examples such as `application.Example.json` and `Config/example.json` remain allowed. They must not contain deployment credentials.
+
+A project with a deliberate exception can explicitly opt out:
+
+```xml
+<PropertyGroup>
+  <ClcConfigurationValidatePublish>false</ClcConfigurationValidatePublish>
+</PropertyGroup>
+```
+
+Only `false` disables the guard. It checks the SDK publish item list, not JSON contents, arbitrary secret files, or files copied by custom deployment steps. Use a clean publish destination: it does not remove or inspect stale files from earlier publishes. Certificate policy, deployment validation, and operational provisioning remain outside this guard.
+
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, malformed escaped property names, redacted errors, disposable fixture cleanup, and package-backed public API usage. A real `WebApplicationFactory.CreateClient` integration test confirms that isolated test settings replace earlier providers while listener settings remain available; it does not create a conventional configuration file. The packed-package smoke test publishes a package-backed consumer and runs discovery and malformed-command checks as separate processes on Windows and Linux, before any conventional configuration exists. It verifies exact stdout/stderr, exit codes, and that discovery leaves the application data directory absent. It also verifies package metadata, checks the public startup extension against a unique missing path without creating it, loads a temporary JSON fixture through the hostless reader, and starts a consumer host with isolated test settings. All test fixtures stay in temporary directories; tests do not write to machine ProgramData.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, malformed escaped property names, redacted errors, disposable fixture cleanup, and package-backed public API usage. A real `WebApplicationFactory.CreateClient` integration test confirms that isolated test settings replace earlier providers while listener settings remain available; it does not create a conventional configuration file. The packed-package smoke test publishes a package-backed consumer and runs discovery and malformed-command checks as separate processes on Windows and Linux, before any conventional configuration exists. It verifies exact stdout/stderr, exit codes, and that discovery leaves the application data directory absent. It also verifies package metadata, checks the public startup extension against a unique missing path without creating it, loads a temporary JSON fixture through the hostless reader, and starts a consumer host with isolated test settings. A second packed consumer compiles/publishes the Worker sample, checks its runtime framework metadata, and starts a real Generic Host hosted service with isolated settings. Publish fixtures cover default-on rejection, explicit opt-out, allowed examples, excluded operational files, case-insensitive nested names, and renamed source/output paths. Both suites run on Windows and Linux; no Windows service is installed. All test fixtures stay in temporary directories; tests do not write to machine ProgramData.
 
 ```text
 dotnet restore Clc.Configuration.slnx

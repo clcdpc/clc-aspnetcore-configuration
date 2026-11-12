@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
@@ -26,7 +26,7 @@ internal static class ExternalConfigurationLoader
     internal static string ResolvePath(string applicationDirectoryName, string programDataRoot) =>
         ClcApplicationPaths.Resolve(applicationDirectoryName, programDataRoot).ConfigurationFilePath;
 
-    internal static void AddFromFile(WebApplicationBuilder builder, string applicationDirectoryName, string path)
+    internal static void AddFromFile(IHostApplicationBuilder builder, string applicationDirectoryName, string path)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ClcApplicationPaths.ValidateApplicationDirectoryName(applicationDirectoryName);
