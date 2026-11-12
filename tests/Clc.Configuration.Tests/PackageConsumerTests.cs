@@ -10,10 +10,13 @@ public sealed class PackageConsumerTests
 {
     private const string FixtureConsumerProgram = """
         using System;
+        using System.Collections.Generic;
         using System.Threading.Tasks;
         using Clc.Configuration;
+        using Clc.Configuration.Testing;
         using Microsoft.AspNetCore.Builder;
         using Microsoft.AspNetCore.Hosting;
+        using Microsoft.Extensions.Configuration;
 
         public static class Program
         {
@@ -22,6 +25,36 @@ public sealed class PackageConsumerTests
                 if (args.Length != 1 || string.IsNullOrWhiteSpace(args[0]))
                 {
                     throw new ArgumentException("Expected the isolated application directory name.");
+                }
+
+                using (var jsonFixture = ClcConfigurationTesting.CreateJsonFile(
+                    "{\"DeploymentProbe\":\"loaded-without-host\"}"))
+                {
+                    var deploymentConfiguration = ClcConfigurationReader.LoadFromFile(
+                        "clc-package-test",
+                        jsonFixture.FilePath);
+                    if (deploymentConfiguration["DeploymentProbe"] != "loaded-without-host")
+                    {
+                        throw new InvalidOperationException("The packaged hostless reader did not load its fixture.");
+                    }
+                }
+
+                var testConfiguration = new ConfigurationBuilder()
+                    .AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["urls"] = "http://127.0.0.1:0",
+                        ["Removed:Provider"] = "should-be-removed"
+                    })
+                    .AddClcConfigurationForTesting(new Dictionary<string, string?>
+                    {
+                        ["Testing:Fixture"] = "loaded-from-testing-helper"
+                    })
+                    .Build();
+                if (testConfiguration["Testing:Fixture"] != "loaded-from-testing-helper" ||
+                    testConfiguration["urls"] != "http://127.0.0.1:0" ||
+                    testConfiguration["Removed:Provider"] is not null)
+                {
+                    throw new InvalidOperationException("The packaged testing helper did not replace and preserve its providers.");
                 }
 
                 var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });

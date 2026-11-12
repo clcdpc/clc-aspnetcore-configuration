@@ -71,11 +71,88 @@ The JSON root must be an object. Duplicate property names are rejected case-inse
 
 ## Failure behavior
 
-Startup fails immediately with an `InvalidOperationException` if the OS common application data directory is unavailable, the required file is missing or unreadable, or the file contains malformed JSON, duplicate keys, unsupported encoding, or invalid `Logging:LogLevel` values. The message identifies the configuration path and remediation while omitting values from the file and parser exceptions. The file is never rewritten.
+Startup fails immediately if the OS common application data directory is unavailable or the required file cannot be loaded. File validation failures use `ClcConfigurationException`, which derives from `InvalidOperationException` for existing handlers. Its `Reason` distinguishes missing and unreadable files, invalid encoding, malformed JSON, invalid root shape, duplicate keys, ambiguous keys, size and depth limits, and invalid framework log levels. Diagnostics include the normalized file path and safe numeric parser location when available; they omit configuration values, JSON property paths and names, document excerpts, parser messages, and inner exceptions. The file is never rewritten.
+
+## Hostless deployment validation
+
+`ClcConfigurationReader` exposes the same parser and file validation without constructing a web host:
+
+```csharp
+using Clc.Configuration;
+using Microsoft.Extensions.Configuration;
+
+try
+{
+    // Pass the absolute path selected by the existing deployment workflow.
+    var configuration = ClcConfigurationReader.LoadFromFile("clc-ssrs-web", configurationPath);
+    var database = configuration.GetSection("Database").Get<DatabaseOptions>()
+        ?? throw new InvalidOperationException("Database settings are required.");
+
+    ValidateDatabaseForThisApplication(database);
+    return CreateDeploymentSuccessResponse();
+}
+catch (ClcConfigurationException error)
+{
+    return CreateDeploymentFailureResponse(error.Reason, error.Message);
+}
+```
+
+`Load("clc-ssrs-web")` reads the conventional CommonApplicationData path; `LoadFromFile` accepts an explicit absolute path for the existing deployment validation flow and parser tests. Both return an in-memory snapshot. The example's `DatabaseOptions`, validation method, and response methods are application-owned; the library does not validate application sections, database access, key compatibility, or configuration revisions.
+
+This operation does not construct a web host, start listeners or background services, initialize logging, generate keys, or modify files. It checks the file under the caller's identity. A successful check does not prove that the IIS identity can read or decrypt every value, or that external services are available. Normal startup still reads and validates the conventional file under the actual runtime identity.
+
+CLC.Deployment remains responsible for orchestrating deployment validation; this reader is only the shared file-loading and validation API.
+
+## Consumer testing helpers
+
+`Clc.Configuration.Testing` provides opt-in in-memory replacement and disposable JSON fixtures. Both use isolated state and preserve the normal listener-setting precedence. Ordinary parser and application tests can stay in the system temporary directory without writing to ProgramData:
+
+```csharp
+using Clc.Configuration;
+using Clc.Configuration.Testing;
+
+using var fixture = ClcConfigurationTesting.CreateJsonFile("""
+    { "MyOptions": { "Enabled": true } }
+    """);
+var configuration = ClcConfigurationReader.LoadFromFile("clc-ssrs-web", fixture.FilePath);
+```
+
+For a consumer app that exposes a test host entry point and shares its application composition, a `WebApplicationFactory` can replace configuration explicitly:
+
+```csharp
+using Clc.Configuration.Testing;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
+
+public sealed class PortalTestEntryPoint
+{
+    public static IHostBuilder CreateHostBuilder(string[] args) =>
+        Host.CreateDefaultBuilder(args)
+            .ConfigureWebHostDefaults(web => web.UseStartup<PortalStartup>());
+}
+
+public sealed class PortalFactory : WebApplicationFactory<PortalTestEntryPoint>
+{
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.ConfigureAppConfiguration((_, configuration) =>
+            configuration.AddClcConfigurationForTesting(new Dictionary<string, string?>
+            {
+                ["MyOptions:Enabled"] = "true",
+                ["MyOptions:Endpoint"] = "https://example.test"
+            })
+        );
+    }
+}
+```
+
+`PortalTestEntryPoint` and `PortalStartup` are application-owned examples; this test entry point reuses application composition while omitting the production file-loading call. Add `Microsoft.AspNetCore.Mvc.Testing` in the consumer test project. A factory that directly runs a production `Program` which calls `AddClcConfiguration` still executes that normal startup call and reads the conventional file. The helper does not intercept startup. `AddClcConfiguration` remains source-compatible and has no path override.
 
 ## Build and test
 
-The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshot behavior, encoding, malformed input, redacted errors, and a consumer that packs the NuGet package and starts a host through the public `AddClcConfiguration` entry point. The package smoke test confirms that the package and consumer reference the project version, checks the packed metadata and license/readme files, provisions a uniquely named fixture under the actual CommonApplicationData directory, and restores through an isolated NuGet package cache. The test identity needs permission to create and remove that fixture.
+The focused tests cover path resolution, directory-name validation, provider authority, listener-setting retention, startup snapshots, hostless and temporary-file reads, encoding and parser boundaries, redacted errors, disposable fixture cleanup, and package-backed public API usage. The package smoke test also starts a consumer through the public `AddClcConfiguration` entry point at the conventional CommonApplicationData path. It provisions only a uniquely named fixture and restores through an isolated NuGet package cache; that one smoke test needs permission to create and remove its fixture. Ordinary tests do not write to ProgramData.
 
 ```text
 dotnet restore Clc.Configuration.slnx
