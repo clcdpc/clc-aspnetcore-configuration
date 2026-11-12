@@ -12,11 +12,6 @@ internal static class ExternalConfigurationLoader
     internal const int MaximumConfigurationBytes = 4 * 1024 * 1024;
     private const int MaximumJsonDepth = 32;
 
-    private static readonly HashSet<string> WindowsReservedDirectoryNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"
-    };
-
     private static readonly string[] PreservedHostKeys =
     [
         WebHostDefaults.ServerUrlsKey,
@@ -25,42 +20,23 @@ internal static class ExternalConfigurationLoader
         WebHostDefaults.PreferHostingUrlsKey
     ];
 
-    internal static string ResolvePath(string applicationDirectoryName)
-    {
-        ValidateApplicationDirectoryName(applicationDirectoryName);
+    internal static string ResolvePath(string applicationDirectoryName) =>
+        ClcApplicationPaths.Resolve(applicationDirectoryName).ConfigurationFilePath;
 
-        var programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-        if (string.IsNullOrWhiteSpace(programData) || !Path.IsPathFullyQualified(programData))
-        {
-            throw new InvalidOperationException("The operating-system ProgramData directory is unavailable.");
-        }
-
-        return ResolvePath(applicationDirectoryName, programData);
-    }
-
-    internal static string ResolvePath(string applicationDirectoryName, string programDataRoot)
-    {
-        ValidateApplicationDirectoryName(applicationDirectoryName);
-        ArgumentException.ThrowIfNullOrWhiteSpace(programDataRoot);
-        if (!Path.IsPathFullyQualified(programDataRoot))
-        {
-            throw new ArgumentException("The ProgramData root must be an absolute path.", nameof(programDataRoot));
-        }
-
-        return Path.GetFullPath(Path.Combine(programDataRoot, applicationDirectoryName, "Config", "application.json"));
-    }
+    internal static string ResolvePath(string applicationDirectoryName, string programDataRoot) =>
+        ClcApplicationPaths.Resolve(applicationDirectoryName, programDataRoot).ConfigurationFilePath;
 
     internal static void AddFromFile(WebApplicationBuilder builder, string applicationDirectoryName, string path)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ValidateApplicationDirectoryName(applicationDirectoryName);
+        ClcApplicationPaths.ValidateApplicationDirectoryName(applicationDirectoryName);
         var configuration = ReadSnapshot(ValidateAndNormalizeFilePath(path));
         ReplaceConfiguration(builder.Configuration, configuration);
     }
 
     internal static IConfiguration LoadFromFile(string applicationDirectoryName, string path)
     {
-        ValidateApplicationDirectoryName(applicationDirectoryName);
+        ClcApplicationPaths.ValidateApplicationDirectoryName(applicationDirectoryName);
         var configuration = ReadSnapshot(ValidateAndNormalizeFilePath(path));
         return new ConfigurationBuilder().AddInMemoryCollection(configuration).Build();
     }
@@ -352,36 +328,6 @@ internal static class ExternalConfigurationLoader
                 segments[2].Equals("LogLevel", StringComparison.OrdinalIgnoreCase);
 
         return isGlobalLevel || isProviderLevel;
-    }
-
-    internal static void ValidateApplicationDirectoryName(string applicationDirectoryName)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(applicationDirectoryName);
-
-        var extensionSeparator = applicationDirectoryName.IndexOf('.');
-        var deviceName = extensionSeparator >= 0
-            ? applicationDirectoryName[..extensionSeparator]
-            : applicationDirectoryName;
-        var isNumberedDeviceName = deviceName.Length == 4 &&
-            (deviceName.StartsWith("COM", StringComparison.OrdinalIgnoreCase) ||
-                deviceName.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
-            deviceName[3] is >= '1' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3';
-
-        if (applicationDirectoryName is "." or ".." ||
-            Path.IsPathRooted(applicationDirectoryName) ||
-            applicationDirectoryName.Contains('/') ||
-            applicationDirectoryName.Contains('\\') ||
-            applicationDirectoryName.EndsWith(' ') ||
-            applicationDirectoryName.EndsWith('.') ||
-            applicationDirectoryName.Any(char.IsControl) ||
-            applicationDirectoryName.IndexOfAny(['<', '>', ':', '"', '|', '?', '*']) >= 0 ||
-            WindowsReservedDirectoryNames.Contains(deviceName) ||
-            isNumberedDeviceName)
-        {
-            throw new ArgumentException(
-                "The application directory name must be one portable directory name, not a path.",
-                nameof(applicationDirectoryName));
-        }
     }
 
     private static bool IsDepthLimitFailure(JsonException exception)
