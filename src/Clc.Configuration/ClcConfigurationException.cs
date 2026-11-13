@@ -1,6 +1,6 @@
 namespace Clc.Configuration;
 
-/// <summary>Stable categories for file loading and validation failures.</summary>
+/// <summary>Stable categories for file loading, validation, and optional bootstrap failures.</summary>
 public enum ClcConfigurationErrorReason
 {
     MissingFile,
@@ -12,7 +12,12 @@ public enum ClcConfigurationErrorReason
     AmbiguousKey,
     SizeLimitExceeded,
     DepthLimitExceeded,
-    InvalidFrameworkLogLevel
+    InvalidFrameworkLogLevel,
+    ConfigurationCreated,
+    UnreplacedPlaceholder,
+    ExampleFileMissing,
+    ExampleFileUnreadable,
+    BootstrapFailed
 }
 
 /// <summary>A redacted external configuration failure that remains compatible with InvalidOperationException handlers.</summary>
@@ -75,6 +80,16 @@ public sealed class ClcConfigurationException : InvalidOperationException
                 $"External application configuration file exceeds the maximum JSON depth of 32: '{safePath}'. Simplify the JSON and restart the application.",
             ClcConfigurationErrorReason.InvalidFrameworkLogLevel =>
                 $"External application configuration file contains invalid framework logging levels: '{safePath}'. Use named levels from Trace through None and restart the application.",
+            ClcConfigurationErrorReason.ConfigurationCreated =>
+                $"Created external application configuration from the example: '{safePath}'. Startup has stopped. Review the file, replace deployment-specific values, set appropriate access permissions, and restart the application.",
+            ClcConfigurationErrorReason.UnreplacedPlaceholder =>
+                $"External application configuration still contains the literal placeholder REPLACE_ME: '{safePath}'. Replace every occurrence and restart the application.",
+            ClcConfigurationErrorReason.ExampleFileMissing =>
+                $"Configuration bootstrap example file is missing: '{safePath}'. Include the sanitized example in the application's content root or specify an explicit example path.",
+            ClcConfigurationErrorReason.ExampleFileUnreadable =>
+                $"Configuration bootstrap example file cannot be read: '{safePath}'. Check the example path and read access for the caller's identity.",
+            ClcConfigurationErrorReason.BootstrapFailed =>
+                $"Configuration bootstrap could not create the external file: '{safePath}'. Existing files are never overwritten. Check directory and file permissions and review any incomplete file before restarting.",
             _ => throw new ArgumentOutOfRangeException(nameof(reason))
         };
 

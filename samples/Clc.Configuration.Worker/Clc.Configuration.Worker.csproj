@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Clc.Configuration" Version="$(PackageVersion)" />
+    <Content Update="config/example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

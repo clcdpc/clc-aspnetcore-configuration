@@ -65,13 +65,37 @@ The library resolves the OS-level `Environment.SpecialFolder.CommonApplicationDa
 <CommonApplicationData>/<application directory name>/Config/application.json
 ```
 
-For example, `AddClcConfiguration("clc-ssrs-web")` reads the `clc-ssrs-web/Config/application.json` file beneath ProgramData on Windows and the common application data directory on Linux. The same path is used in every ASP.NET Core environment. The library does not select environment-specific files, create a replacement file, or provide a production path override.
+For example, `AddClcConfiguration("clc-ssrs-web")` reads the `clc-ssrs-web/Config/application.json` file beneath ProgramData on Windows and the common application data directory on Linux. The same path is used in every ASP.NET Core environment. Normal loading does not select environment-specific files, create a replacement file, or provide a production path override.
 
-Provision `application.json` before starting the application and grant the application identity read access. The library does not ship or copy operational settings into the application directory.
+Provision `application.json` before starting the application and grant the application identity read access. Alternatively, explicitly opt into the starter-file helper below. The package does not supply application-specific settings.
+
+## Optional first-run bootstrap
+
+Web applications and Generic Host workers can use this **instead of** `AddClcConfiguration`:
+
+```csharp
+builder.AddClcConfigurationWithBootstrap(ApplicationDirectoryName);
+// Or select another example, absolute or relative to builder.Environment.ContentRootPath:
+// builder.AddClcConfigurationWithBootstrap(ApplicationDirectoryName, "templates/example.json");
+```
+
+If the conventional `Config/application.json` does not exist, the helper copies `<ContentRootPath>/config/example.json` to it, creating the application's ProgramData directory and `Config` directory as needed. Paths are not relative to the current working directory unless that is the host's content root. An existing operational file is never overwritten, merged, or dependent on the example remaining available.
+
+A successful copy **always throws `ClcConfigurationException` with `Reason == ConfigurationCreated`** to stop startup, even if the example has no placeholders. Edit the created file with deployment values, review its permissions, then restart. On subsequent calls, the helper rejects any literal, case-sensitive `REPLACE_ME` substring in the decoded file text, including comments, keys, and connection strings, with `Reason == UnreplacedPlaceholder`. This is a simple marker check, not application-specific validation or secret detection. The existing `AddClcConfiguration` and hostless reader do not enable it.
+
+Missing/unreadable examples report `ExampleFileMissing` / `ExampleFileUnreadable`; creation failures report `BootstrapFailed`. Errors contain the relevant path and remedy, not configuration contents or inner exceptions. Do not catch these errors and continue building the host. The helper does not terminate the process, start services, manage ACLs/certificates, or coordinate concurrent initializers. Run initial setup once under an appropriately permitted identity; normal runtime only needs read access once the file exists.
+
+The consuming application must keep its example sanitized and include it in build/publish output. For a Web/Worker SDK `Content` item, for example:
+
+```xml
+<Content Update="config/example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+```
+
+Use `None`/`Include` as appropriate for the consuming project and remove any conflicting application-owned exclusion. The package's publish guard permits named examples but still rejects operational `application.json`. The [Worker sample](samples/Clc.Configuration.Worker) demonstrates the opt-in and published example. No extra CLI flag is required; `--clc-appdata-directory` remains read-only when handled before builder creation.
 
 ## Application data paths and command-line discovery
 
-`ClcApplicationPaths.Resolve(ApplicationDirectoryName)` returns absolute `ApplicationDataDirectory`, `ConfigurationDirectory`, and `ConfigurationFilePath` properties using the same resolver and directory-name validation as normal startup. The application data directory is `<CommonApplicationData>/<application directory name>`, not the executable or content directory. Resolution neither reads configuration nor creates files or directories; it works before `application.json` is provisioned. It does not establish existence, access permissions, or deployment readiness. Logs, keys, ACLs, and provisioning remain application-owned.
+`ClcApplicationPaths.Resolve(ApplicationDirectoryName)` returns absolute `ApplicationDataDirectory`, `ConfigurationDirectory`, and `ConfigurationFilePath` properties using the same resolver and directory-name validation as normal startup. The application data directory is `<CommonApplicationData>/<application directory name>`, not the executable or content directory. Resolution neither reads configuration nor creates files or directories; it works before `application.json` is provisioned. It does not establish existence, access permissions, or deployment readiness. Logs, keys, ACLs, and provisioning beyond the optional starter file remain application-owned.
 
 Applications can explicitly opt in with the early `TryHandle` call shown above. On `true`, return its exit code immediately, including failures. Do not put this call after logger initialization or `WebApplication.CreateBuilder`; `AddClcConfiguration` does not automatically handle commands or terminate the process.
 

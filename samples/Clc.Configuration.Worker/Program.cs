@@ -7,7 +7,8 @@ if (ClcConfigurationCommandLine.TryHandle(args, applicationDirectoryName, out va
 }
 
 var builder = Host.CreateApplicationBuilder(args);
-builder.AddClcConfiguration(applicationDirectoryName);
+// Optional first-run bootstrap: creates a starter file, then throws so it can be edited.
+builder.AddClcConfigurationWithBootstrap(applicationDirectoryName);
 builder.Services.AddHostedService<Worker>();
 using var host = builder.Build();
 await host.RunAsync();
