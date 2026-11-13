@@ -7,6 +7,7 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Clc.Configuration" Version="$(PackageVersion)" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
     <Content Update="config/example.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

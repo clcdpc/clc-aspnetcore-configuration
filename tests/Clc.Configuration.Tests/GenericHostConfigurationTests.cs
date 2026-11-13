@@ -93,4 +93,18 @@ public sealed class GenericHostConfigurationTests
         Assert.Throws<ArgumentNullException>(() =>
             ClcConfigurationBuilderExtensions.AddClcConfiguration((WebApplicationBuilder)null!, "clc-web-test"));
     }
+
+    [Fact]
+    public void GenericOverloadsPreserveConcreteBuilderReturnTypes()
+    {
+        // These assignments also verify existing fluent web/worker source usage compiles.
+        Func<WebApplicationBuilder, WebApplicationBuilder> web = builder => builder.AddClcConfiguration("unused");
+        Func<WebApplicationBuilder, WebApplicationBuilder> webBootstrap = builder => builder.AddClcConfigurationWithBootstrap("unused");
+        Func<HostApplicationBuilder, HostApplicationBuilder> worker = builder => builder.AddClcConfiguration("unused");
+        Func<HostApplicationBuilder, HostApplicationBuilder> workerBootstrap = builder => builder.AddClcConfigurationWithBootstrap("unused");
+        Assert.Throws<ArgumentNullException>(() => web(null!));
+        Assert.Throws<ArgumentNullException>(() => webBootstrap(null!));
+        Assert.Throws<ArgumentNullException>(() => worker(null!));
+        Assert.Throws<ArgumentNullException>(() => workerBootstrap(null!));
+    }
 }
