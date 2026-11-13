@@ -152,6 +152,7 @@ public sealed partial class PackageConsumerTests
             FixtureConsumerProgram.Replace("APPLICATION_DIRECTORY_NAME_PLACEHOLDER", applicationDirectoryName));
         Assert.Equal(expectedPackageVersion, GetConsumerPackageVersion(consumerDirectory));
         var consumerProject = Path.Combine(consumerDirectory, "Clc.Configuration.Consumer.csproj");
+        var sources = WritePackageSources(temporaryDirectory.Path, packageFeed);
 
         await RunDotnetAsync(
             repositoryRoot,
@@ -165,7 +166,7 @@ public sealed partial class PackageConsumerTests
         await RunDotnetAsync(
             consumerDirectory,
             [
-                "restore", consumerProject, "--source", packageFeed, "--packages", packageCache,
+                "restore", consumerProject, "--configfile", sources, "--packages", packageCache,
                 $"-p:Version={expectedPackageVersion}", $"-p:PackageVersion={expectedPackageVersion}"
             ],
             packageCache);
@@ -265,12 +266,13 @@ public sealed partial class PackageConsumerTests
         string workingDirectory,
         IReadOnlyList<string> arguments,
         string packageCache,
-        int expectedExitCode = 0)
+        int expectedExitCode = 0,
+        string dotnet = "dotnet")
     {
         using var process = new Process();
         process.StartInfo = new ProcessStartInfo
         {
-            FileName = "dotnet",
+            FileName = dotnet,
             WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -306,6 +308,21 @@ public sealed partial class PackageConsumerTests
             result.ExitCode == expectedExitCode,
             $"dotnet {string.Join(' ', arguments)} exited with {result.ExitCode}.{Environment.NewLine}{result.StandardOutput}{result.StandardError}");
         return result;
+    }
+
+    private static string WritePackageSources(string directory, string packageFeed)
+    {
+        var path = Path.Combine(directory, "NuGet.Config");
+        new XDocument(new XElement("configuration",
+            new XElement("packageSources", new XElement("clear"),
+                new XElement("add", new XAttribute("key", "local"), new XAttribute("value", packageFeed)),
+                new XElement("add", new XAttribute("key", "nuget.org"), new XAttribute("value", "https://api.nuget.org/v3/index.json"))),
+            new XElement("packageSourceMapping",
+                new XElement("packageSource", new XAttribute("key", "local"),
+                    new XElement("package", new XAttribute("pattern", "Clc.Configuration"))),
+                new XElement("packageSource", new XAttribute("key", "nuget.org"),
+                    new XElement("package", new XAttribute("pattern", "*")))))).Save(path);
+        return path;
     }
 
     private static string GetPackedAssemblyHash(string packagePath)

@@ -91,7 +91,8 @@ public sealed partial class PackageConsumerTests
         Directory.CreateDirectory(Path.Combine(consumerDirectory, "config"));
         File.Copy(Path.Combine(template, "config", "example.json"), Path.Combine(consumerDirectory, "config", "example.json"));
         var project = XDocument.Load(projectPath);
-        project.Descendants("PackageReference").Single().SetAttributeValue("Version", expectedVersion);
+        project.Descendants("PackageReference").Single(item => (string?)item.Attribute("Include") == "Clc.Configuration")
+            .SetAttributeValue("Version", expectedVersion);
         project.Save(projectPath);
 
         await RunDotnetAsync(repositoryRoot,
@@ -101,9 +102,18 @@ public sealed partial class PackageConsumerTests
         using (var package = ZipFile.OpenRead(Assert.Single(Directory.GetFiles(packageFeed, "*.nupkg"))))
         {
             Assert.NotNull(package.GetEntry("buildTransitive/Clc.Configuration.targets"));
+            Assert.DoesNotContain(GetPackageMetadata(package).Descendants(),
+                item => item.Name.LocalName == "frameworkReference");
         }
+        var sources = WritePackageSources(temporaryDirectory.Path, packageFeed);
         await RunDotnetAsync(consumerDirectory,
-            ["restore", projectPath, "--source", packageFeed, "--packages", packageCache], packageCache);
+            ["restore", projectPath, "--configfile", sources,
+             "--packages", packageCache], packageCache);
+
+        var runtimeHost = CreateBaseRuntime(Path.Combine(temporaryDirectory.Path, "base-runtime"));
+        var runtimes = await RunDotnetAsync(temporaryDirectory.Path, ["--list-runtimes"], packageCache, dotnet: runtimeHost);
+        Assert.StartsWith("Microsoft.NETCore.App ", runtimes.StandardOutput);
+        Assert.Single(runtimes.StandardOutput.Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries));
 
         var publishRoot = Path.Combine(temporaryDirectory.Path, "publish");
         async Task<ProcessResult> Publish(string name, string? enabled, int expectedExitCode = 0)
@@ -117,21 +127,28 @@ public sealed partial class PackageConsumerTests
             return await RunDotnetAsync(consumerDirectory, arguments, packageCache, expectedExitCode);
         }
 
-        // Compile and publish the actual sample with only the NuGet package reference.
+        // Compile and publish the actual sample with package references, never project references.
         await Publish("sample", null);
         Assert.Equal(File.ReadAllText(Path.Combine(template, "config", "example.json")),
             File.ReadAllText(Path.Combine(publishRoot, "sample", "config", "example.json")));
         var sampleAssembly = Path.Combine(publishRoot, "sample", "Clc.Configuration.Worker.dll");
         var discovery = await RunDotnetAsync(temporaryDirectory.Path,
-            [sampleAssembly, "--clc-appdata-directory"], packageCache);
+            [sampleAssembly, "--clc-appdata-directory"], packageCache, dotnet: runtimeHost);
         Assert.Equal(ClcApplicationPaths.Resolve("clc-configuration-worker").ApplicationDataDirectory + Environment.NewLine,
             discovery.StandardOutput);
         Assert.Empty(discovery.StandardError);
         using (var runtime = JsonDocument.Parse(File.ReadAllText(
             Path.Combine(publishRoot, "sample", "Clc.Configuration.Worker.runtimeconfig.json"))))
         {
-            Assert.Contains(runtime.RootElement.GetProperty("runtimeOptions").GetProperty("frameworks").EnumerateArray(),
-                framework => framework.GetProperty("name").GetString() == "Microsoft.AspNetCore.App");
+            Assert.Equal("Microsoft.NETCore.App", runtime.RootElement.GetProperty("runtimeOptions")
+                .GetProperty("framework").GetProperty("name").GetString());
+            Assert.False(runtime.RootElement.GetProperty("runtimeOptions").TryGetProperty("frameworks", out _));
+        }
+        using (var dependencies = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(publishRoot, "sample", "Clc.Configuration.Worker.deps.json"))))
+        {
+            Assert.DoesNotContain(dependencies.RootElement.GetProperty("libraries").EnumerateObject(),
+                item => item.Name.StartsWith("Microsoft.AspNetCore.", StringComparison.Ordinal));
         }
 
         // The published fixture runs a real hosted service, but never provisions machine ProgramData.
@@ -141,7 +158,7 @@ public sealed partial class PackageConsumerTests
             WorkerFixtureProgram.Replace("APPLICATION_DIRECTORY_NAME_PLACEHOLDER", name));
         await Publish("worker", "true");
         var worker = await RunDotnetAsync(temporaryDirectory.Path,
-            [Path.Combine(publishRoot, "worker", "Clc.Configuration.Worker.dll")], packageCache);
+            [Path.Combine(publishRoot, "worker", "Clc.Configuration.Worker.dll")], packageCache, dotnet: runtimeHost);
         Assert.Contains("Started package-backed Generic Host worker.", worker.StandardOutput);
         Assert.False(Directory.Exists(ClcApplicationPaths.Resolve(name).ApplicationDataDirectory));
 

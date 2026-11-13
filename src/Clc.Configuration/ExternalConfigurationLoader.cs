@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -14,10 +13,10 @@ internal static class ExternalConfigurationLoader
 
     private static readonly string[] PreservedHostKeys =
     [
-        WebHostDefaults.ServerUrlsKey,
+        "urls",
         "http_ports",
         "https_ports",
-        WebHostDefaults.PreferHostingUrlsKey
+        "preferHostingUrls"
     ];
 
     internal static string ResolvePath(string applicationDirectoryName) =>
