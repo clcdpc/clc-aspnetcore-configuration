@@ -32,6 +32,17 @@ public sealed partial class PackageConsumerTests
                 throw;
             }
         }
+        // The public bootstrap integration is also available from the packed assembly.
+        // Its missing-example failure must not create anything under machine ProgramData.
+        try
+        {
+            builder.AddClcConfigurationWithBootstrap(applicationDirectoryName,
+                exampleConfigurationPath: Path.Combine(AppContext.BaseDirectory, "absent-example.json"));
+            throw new InvalidOperationException("A missing example unexpectedly bootstrapped configuration.");
+        }
+        catch (ClcConfigurationException error) when (error.Reason == ClcConfigurationErrorReason.ExampleFileMissing)
+        {
+        }
         builder.Configuration.AddClcConfigurationForTesting(new Dictionary<string, string?>
         {
             ["Worker:Value"] = "package-backed-worker"
@@ -77,6 +88,8 @@ public sealed partial class PackageConsumerTests
         var template = Path.Combine(repositoryRoot, "samples", "Clc.Configuration.Worker");
         File.Copy(Path.Combine(template, "Clc.Configuration.Worker.csproj"), projectPath);
         File.Copy(Path.Combine(template, "Program.cs"), Path.Combine(consumerDirectory, "Program.cs"));
+        Directory.CreateDirectory(Path.Combine(consumerDirectory, "config"));
+        File.Copy(Path.Combine(template, "config", "example.json"), Path.Combine(consumerDirectory, "config", "example.json"));
         var project = XDocument.Load(projectPath);
         project.Descendants("PackageReference").Single().SetAttributeValue("Version", expectedVersion);
         project.Save(projectPath);
@@ -106,6 +119,8 @@ public sealed partial class PackageConsumerTests
 
         // Compile and publish the actual sample with only the NuGet package reference.
         await Publish("sample", null);
+        Assert.Equal(File.ReadAllText(Path.Combine(template, "config", "example.json")),
+            File.ReadAllText(Path.Combine(publishRoot, "sample", "config", "example.json")));
         var sampleAssembly = Path.Combine(publishRoot, "sample", "Clc.Configuration.Worker.dll");
         var discovery = await RunDotnetAsync(temporaryDirectory.Path,
             [sampleAssembly, "--clc-appdata-directory"], packageCache);
@@ -138,6 +153,7 @@ public sealed partial class PackageConsumerTests
         File.WriteAllText(Path.Combine(fixtureDirectory, "example.json"), "{}");
         project.Root!.Add(XElement.Parse("""
             <ItemGroup>
+              <Content Remove="config/example.json" />
               <None Remove="Fixtures/**/*" />
               <Content Remove="Fixtures/**/*" />
               <Content Include="Fixtures/application.Example.json" Link="application.Example.json" CopyToPublishDirectory="PreserveNewest" />

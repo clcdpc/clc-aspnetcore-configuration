@@ -26,11 +26,12 @@ internal static class ExternalConfigurationLoader
     internal static string ResolvePath(string applicationDirectoryName, string programDataRoot) =>
         ClcApplicationPaths.Resolve(applicationDirectoryName, programDataRoot).ConfigurationFilePath;
 
-    internal static void AddFromFile(IHostApplicationBuilder builder, string applicationDirectoryName, string path)
+    internal static void AddFromFile(IHostApplicationBuilder builder, string applicationDirectoryName, string path,
+        bool rejectPlaceholders = false)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ClcApplicationPaths.ValidateApplicationDirectoryName(applicationDirectoryName);
-        var configuration = ReadSnapshot(ValidateAndNormalizeFilePath(path));
+        var configuration = ReadSnapshot(ValidateAndNormalizeFilePath(path), rejectPlaceholders);
         ReplaceConfiguration(builder.Configuration, configuration);
     }
 
@@ -99,7 +100,7 @@ internal static class ExternalConfigurationLoader
         return settings;
     }
 
-    private static Dictionary<string, string?> ReadSnapshot(string path)
+    private static Dictionary<string, string?> ReadSnapshot(string path, bool rejectPlaceholders = false)
     {
         byte[] input;
         try
@@ -150,6 +151,13 @@ internal static class ExternalConfigurationLoader
         catch (DecoderFallbackException)
         {
             throw CreateError(path, ClcConfigurationErrorReason.InvalidEncoding);
+        }
+
+        // Only the bootstrap integration enables this literal, case-sensitive text check.
+        // Scan the same decoded snapshot that will be parsed, including comments and keys.
+        if (rejectPlaceholders && jsonBytes.AsSpan().IndexOf("REPLACE_ME"u8) >= 0)
+        {
+            throw CreateError(path, ClcConfigurationErrorReason.UnreplacedPlaceholder);
         }
 
         JsonDocument document;
