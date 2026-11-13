@@ -1,0 +1,19 @@
+<Project>
+  <!-- Enabled for consumers by default; only an explicit false opts out. -->
+  <PropertyGroup>
+    <ClcConfigurationValidatePublish Condition="'$(ClcConfigurationValidatePublish)' == ''">true</ClcConfigurationValidatePublish>
+  </PropertyGroup>
+  <Target Name="ClcConfigurationValidatePublish"
+          AfterTargets="ComputeFilesToPublish"
+          Condition="'$(ClcConfigurationValidatePublish)' != 'false'">
+    <ItemGroup>
+      <_ClcOperationalConfiguration Remove="@(_ClcOperationalConfiguration)" />
+      <!-- Check source and output names: linking or renaming must not hide application.json. -->
+      <_ClcOperationalConfiguration Include="@(ResolvedFileToPublish)"
+        Condition="$([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.Identity)', '(?i)(^|[\\/])application\.json$')) Or $([System.Text.RegularExpressions.Regex]::IsMatch('%(ResolvedFileToPublish.RelativePath)', '(?i)(^|[\\/])application\.json$'))" />
+    </ItemGroup>
+    <Error Condition="'@(_ClcOperationalConfiguration)' != ''"
+           Code="CLC_CONFIG001"
+           Text="Operational application.json must remain outside publish output. Set CopyToPublishDirectory=Never or remove the publish item. Forbidden output: @(_ClcOperationalConfiguration->'%(RelativePath)', ', ')." />
+  </Target>
+</Project>

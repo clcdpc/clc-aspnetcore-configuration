@@ -2,14 +2,14 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <PackageId>Clc.Configuration</PackageId>
-    <Description>Loads one authoritative ASP.NET Core application.json from the operating system ProgramData directory.</Description>
+    <Description>Loads one authoritative .NET application.json from the operating system ProgramData directory.</Description>
     <Authors>Central Library Consortium</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/clcdpc/clc-configuration</PackageProjectUrl>
     <RepositoryUrl>https://github.com/clcdpc/clc-configuration</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageTags>configuration;aspnetcore;clc</PackageTags>
+    <PackageTags>configuration;aspnetcore;hosting;clc</PackageTags>
     <IsPackable>true</IsPackable>
   </PropertyGroup>
 
@@ -18,5 +18,6 @@
     <InternalsVisibleTo Include="Clc.Configuration.Tests" />
     <None Include="../../README.md" Pack="true" PackagePath="\" />
     <None Include="../../LICENSE" Pack="true" PackagePath="\" />
+    <None Update="buildTransitive/Clc.Configuration.targets" Pack="true" PackagePath="buildTransitive/Clc.Configuration.targets" />
   </ItemGroup>
 </Project>

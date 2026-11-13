@@ -7,7 +7,7 @@ using System.Xml.Linq;
 
 namespace Clc.Configuration.Tests;
 
-public sealed class PackageConsumerTests
+public sealed partial class PackageConsumerTests
 {
     private const string FixtureConsumerProgram = """
         #nullable enable
